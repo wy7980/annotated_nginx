@@ -18,9 +18,12 @@
 // 检查在ngx_http_core_post_rewrite_phase
 #define NGX_HTTP_MAX_URI_CHANGES           10
 
-// 最多只能产生50个子请求
-// 避免过多子请求导致处理效率降低
-// 在1.8版之前是200,1.10之后减少到50
+// 每个请求最多只能产生50层次调用的子请求
+// 在1.8版之前是200，限制主请求最多发出200个子请求
+// 1.10之后改变了实现方式，50是子请求的“深度”限制
+// 所以产生子请求基本已经没有限制
+// 子请求数量最多是65535 - 1000
+// 但应该尽量避免过多子请求导致处理效率降低
 #define NGX_HTTP_MAX_SUBREQUESTS           50
 
 /* must be 2^n */
@@ -80,9 +83,16 @@
 
 
 /* unused                                  1 */
+
+// 子请求的输出不会发送到客户端，而是在内存中处理
 #define NGX_HTTP_SUBREQUEST_IN_MEMORY      2
+
+// 此标记仅用于ssi filter
 #define NGX_HTTP_SUBREQUEST_WAITED         4
+
+// 子请求是父请求的完全克隆
 #define NGX_HTTP_SUBREQUEST_CLONE          8
+
 #define NGX_HTTP_SUBREQUEST_BACKGROUND     16
 
 #define NGX_HTTP_LOG_UNSAFE                1
@@ -444,10 +454,8 @@ struct ngx_http_cleanup_s {
 typedef ngx_int_t (*ngx_http_post_subrequest_pt)(ngx_http_request_t *r,
     void *data, ngx_int_t rc);
 
-// 子请求相关的功能代码不建议仔细研究
-// 可能Nginx今后会逐渐废弃子请求
-
 // 子请求完成后的处理函数，相当于闭包/lambda
+// 见ngx_http_core_module.c:ngx_http_subrequest
 typedef struct {
     ngx_http_post_subrequest_pt       handler;
     void                             *data;
@@ -590,7 +598,7 @@ struct ngx_http_request_s {
     ngx_chain_t                      *out;
 
     // 指向主请求，即由客户端发起的请求
-    // 如果没有子请求，那么r == main
+    // 如果不是子请求，那么r == main
     ngx_http_request_t               *main;
 
     // 父请求，如果是子请求，那么指向产生它的父请求
@@ -663,7 +671,8 @@ struct ngx_http_request_s {
     // 1.8里是8位，1.10改为16位
     unsigned                          count:16;
 
-    // 子请求数量，最多不能超过50个
+    // 子请求调用层次，最多不能超过50层
+    // 实际的数量大约是65535-1000
     unsigned                          subrequests:8;
 
     // 请求的阻塞数量，用于线程池
@@ -673,6 +682,7 @@ struct ngx_http_request_s {
 
     unsigned                          aio:1;
 
+    // ngx_http_state_e,标记当前请求所在的处理状态
     unsigned                          http_state:4;
 
     /* URI with "/." and on Win32 with "//" */
@@ -699,8 +709,10 @@ struct ngx_http_request_s {
 
     // uri改写的次数
     // 在ngx_http_core_post_rewrite_phase里检查
+    // 目前最多10次，超过则报错不能继续处理
     unsigned                          uri_changes:4;
 
+    // 读取body到单个内存缓冲区
     unsigned                          request_body_in_single_buf:1;
 
     // 是否把请求体数据存入文件，与request_body_no_buffering相反
@@ -715,9 +727,11 @@ struct ngx_http_request_s {
     // 1-不缓存请求体数据
     unsigned                          request_body_no_buffering:1;
 
-    // 要求upstream的数据都在内存里，方便处理
+    // 要求子请求的数据都在内存里，方便处理
+    // 同时置filter_need_in_memory
     unsigned                          subrequest_in_memory:1;
 
+    // NGX_HTTP_SUBREQUEST_WAITED
     unsigned                          waited:1;
 
 #if (NGX_HTTP_CACHE)
@@ -730,6 +744,10 @@ struct ngx_http_request_s {
     unsigned                          gzip_vary:1;
 #endif
 
+#if (NGX_PCRE)
+    unsigned                          realloc_captures:1;
+#endif
+
     unsigned                          proxy:1;
     unsigned                          bypass_cache:1;
     unsigned                          no_cache:1;
@@ -737,13 +755,16 @@ struct ngx_http_request_s {
     /*
      * instead of using the request context data in
      * ngx_http_limit_conn_module and ngx_http_limit_req_module
-     * we use the single bits in the request structure
+     * we use the bit fields in the request structure
      */
 
     // 给流量控制模块用的标志位
     // 不放在ctx结构体里，节约内存
-    unsigned                          limit_conn_set:1;
-    unsigned                          limit_req_set:1;
+    unsigned                          limit_conn_status:2;
+    unsigned                          limit_req_status:3;
+
+    unsigned                          limit_rate_set:1;
+    unsigned                          limit_rate_after_set:1;
 
 #if 0
     unsigned                          cacheable:1;
@@ -805,7 +826,9 @@ struct ngx_http_request_s {
     unsigned                          stat_writing:1;
     unsigned                          stat_processing:1;
 
+    // NGX_HTTP_SUBREQUEST_BACKGROUND
     unsigned                          background:1;
+
     unsigned                          health_check:1;
 
     /* used to parse HTTP headers */

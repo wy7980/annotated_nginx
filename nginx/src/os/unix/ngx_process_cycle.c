@@ -4,6 +4,8 @@
 // * ngx_single_process_cycle
 // * ngx_worker_process_cycle
 // * ngx_signal_worker_processes
+// * ngx_worker_process_init
+// * ngx_reap_children
 
 /*
  * Copyright (C) Igor Sysoev
@@ -52,8 +54,10 @@ static void ngx_worker_process_init(ngx_cycle_t *cycle, ngx_int_t worker);
 // 内部直接exit(0)退出
 static void ngx_worker_process_exit(ngx_cycle_t *cycle);
 
-// cache相关的暂不研究
+// 处理channel发送来的消息
 static void ngx_channel_handler(ngx_event_t *ev);
+
+// cache相关的暂不研究
 static void ngx_cache_manager_process_cycle(ngx_cycle_t *cycle, void *data);
 static void ngx_cache_manager_process_handler(ngx_event_t *ev);
 static void ngx_cache_loader_process_handler(ngx_event_t *ev);
@@ -147,11 +151,13 @@ ngx_master_process_cycle(ngx_cycle_t *cycle)
     sigaddset(&set, ngx_signal_value(NGX_SHUTDOWN_SIGNAL));
     sigaddset(&set, ngx_signal_value(NGX_CHANGEBIN_SIGNAL));
 
+    // 阻塞信号，避免信号丢失
     if (sigprocmask(SIG_BLOCK, &set, NULL) == -1) {
         ngx_log_error(NGX_LOG_ALERT, cycle->log, ngx_errno,
                       "sigprocmask() failed");
     }
 
+    // 信号集清空
     sigemptyset(&set);
 
 
@@ -325,7 +331,12 @@ ngx_master_process_cycle(ngx_cycle_t *cycle)
             ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0, "reconfiguring");
 
             // nginx可执行程序不变，以当前cycle重新初始化
+            // 重新读取加载配置文件，并拷贝当前cycle的一些数据
+            // 如端口、日志文件、共享内存等
             cycle = ngx_init_cycle(cycle);
+
+            // 可能配置文件不正确，初始化失败
+            // 使用原有的cycle继续运行，不会停止服务
             if (cycle == NULL) {
                 cycle = (ngx_cycle_t *) ngx_cycle;
                 continue;
@@ -572,13 +583,16 @@ ngx_start_cache_manager_processes(ngx_cycle_t *cycle, ngx_uint_t respawn)
 }
 
 
+// 建立channel，用于进程间通信
 static void
 ngx_pass_open_channel(ngx_cycle_t *cycle, ngx_channel_t *ch)
 {
     ngx_int_t  i;
 
+    // 遍历进程数组，逐个发送子进程消息
     for (i = 0; i < ngx_last_process; i++) {
 
+        // 新子进程，结束的子进程不发送
         if (i == ngx_process_slot
             || ngx_processes[i].pid == -1
             || ngx_processes[i].channel[0] == -1)
@@ -594,6 +608,8 @@ ngx_pass_open_channel(ngx_cycle_t *cycle, ngx_channel_t *ch)
 
         /* TODO: NGX_AGAIN */
 
+        // 发送信息
+        // 在其他进程的ngx_channel_handler里处理
         ngx_write_channel(ngx_processes[i].channel[0],
                           ch, sizeof(ngx_channel_t), cycle->log);
     }
@@ -601,6 +617,7 @@ ngx_pass_open_channel(ngx_cycle_t *cycle, ngx_channel_t *ch)
 
 
 // master进程调用，遍历ngx_processes数组，用kill发送信号
+// 但通常是使用channel(socket pair)发送信号
 static void
 ngx_signal_worker_processes(ngx_cycle_t *cycle, int signo)
 {
@@ -616,6 +633,7 @@ ngx_signal_worker_processes(ngx_cycle_t *cycle, int signo)
 
 #else
 
+    // 把信号转换为nginx自己的channel命令
     switch (signo) {
 
     case ngx_signal_value(NGX_SHUTDOWN_SIGNAL):
@@ -652,6 +670,7 @@ ngx_signal_worker_processes(ngx_cycle_t *cycle, int signo)
                        ngx_processes[i].respawn,
                        ngx_processes[i].just_spawn);
 
+        // 无效的进程直接跳过
         if (ngx_processes[i].detached || ngx_processes[i].pid == -1) {
             continue;
         }
@@ -662,13 +681,16 @@ ngx_signal_worker_processes(ngx_cycle_t *cycle, int signo)
             continue;
         }
 
+        // 正在退出的进程不会发送信号
         if (ngx_processes[i].exiting
             && signo == ngx_signal_value(NGX_SHUTDOWN_SIGNAL))
         {
             continue;
         }
 
+        // 通常是使用channel发送信号
         if (ch.command) {
+            // channel发送成功就不会走下面的kill发送
             if (ngx_write_channel(ngx_processes[i].channel[0],
                                   &ch, sizeof(ngx_channel_t), cycle->log)
                 == NGX_OK)
@@ -677,6 +699,7 @@ ngx_signal_worker_processes(ngx_cycle_t *cycle, int signo)
                     ngx_processes[i].exiting = 1;
                 }
 
+                // 跳过下面的kill发送代码
                 continue;
             }
         }
@@ -745,6 +768,7 @@ ngx_reap_children(ngx_cycle_t *cycle)
         if (ngx_processes[i].exited) {
 
             if (!ngx_processes[i].detached) {
+                // 清理进程相关的channel信息
                 ngx_close_channel(ngx_processes[i].channel, cycle->log);
 
                 ngx_processes[i].channel[0] = -1;
@@ -772,8 +796,12 @@ ngx_reap_children(ngx_cycle_t *cycle)
                 }
             }
 
+            // 检查respawn，如果是异常结束则不重启子进程
             if (ngx_processes[i].respawn
+                // 已经发送信号正在退出，不能重启
                 && !ngx_processes[i].exiting
+
+                // master进程也不能是退出状态
                 && !ngx_terminate
                 && !ngx_quit)
             {
@@ -791,11 +819,13 @@ ngx_reap_children(ngx_cycle_t *cycle)
                 }
 
 
+                // 创建子进程成功，设置channle信息，通知其他worker
                 ch.command = NGX_CMD_OPEN_CHANNEL;
                 ch.pid = ngx_processes[ngx_process_slot].pid;
                 ch.slot = ngx_process_slot;
                 ch.fd = ngx_processes[ngx_process_slot].channel[0];
 
+                // 建立channel，用于进程间通信
                 ngx_pass_open_channel(cycle, &ch);
 
                 live = 1;
@@ -803,6 +833,9 @@ ngx_reap_children(ngx_cycle_t *cycle)
                 continue;
             }
 
+            // 不重启进程，其他处理
+
+            // 检查是不是new_binary进程
             if (ngx_processes[i].pid == ngx_new_binary) {
 
                 ccf = (ngx_core_conf_t *) ngx_get_conf(cycle->conf_ctx,
@@ -825,13 +858,18 @@ ngx_reap_children(ngx_cycle_t *cycle)
                 }
             }
 
+            // 其他情况，进程数量减少
+
+            // 最后一个，末尾计数器减少
             if (i == ngx_last_process - 1) {
                 ngx_last_process--;
 
             } else {
+                // 中间的某个进程，置为无效pid
                 ngx_processes[i].pid = -1;
             }
 
+        // 非exited，正在退出状态
         } else if (ngx_processes[i].exiting || !ngx_processes[i].detached) {
             live = 1;
         }
@@ -912,8 +950,9 @@ ngx_worker_process_cycle(ngx_cycle_t *cycle, void *data)
 
     // 设置进程名字
     // 这里可以改进一下，增加workerid，或者其他特殊标记
-    // 可以由其他模块在init_worker阶段或稍后的时刻特殊操作
     // 例如设置一个特殊的32字节字符串
+    // 注意是在init_worker阶段之后，所以模块的init_process操作是无效的
+    // 可以在init_process里放个定时器，在稍后的时刻操作
     ngx_setproctitle("worker process");
 
     // 无限循环，处理事件和信号
@@ -1175,12 +1214,14 @@ ngx_worker_process_init(ngx_cycle_t *cycle, ngx_int_t worker)
         }
     }
 
+    // 初始化worker进程的进程数组
     for (n = 0; n < ngx_last_process; n++) {
 
         if (ngx_processes[n].pid == -1) {
             continue;
         }
 
+        // 本进程的不处理
         if (n == ngx_process_slot) {
             continue;
         }
@@ -1204,6 +1245,7 @@ ngx_worker_process_init(ngx_cycle_t *cycle, ngx_int_t worker)
     ngx_last_process = 0;
 #endif
 
+    // epoll处理channel消息，调用ngx_channel_handler
     if (ngx_add_channel_event(cycle, ngx_channel, NGX_READ_EVENT,
                               ngx_channel_handler)
         == NGX_ERROR)
@@ -1282,6 +1324,7 @@ ngx_worker_process_exit(ngx_cycle_t *cycle)
 }
 
 
+// epoll处理channel消息，调用ngx_channel_handler
 static void
 ngx_channel_handler(ngx_event_t *ev)
 {
@@ -1300,6 +1343,7 @@ ngx_channel_handler(ngx_event_t *ev)
 
     for ( ;; ) {
 
+        // 读取消息
         n = ngx_read_channel(c->fd, &ch, sizeof(ngx_channel_t), ev->log);
 
         ngx_log_debug1(NGX_LOG_DEBUG_CORE, ev->log, 0, "channel: %i", n);
@@ -1327,30 +1371,37 @@ ngx_channel_handler(ngx_event_t *ev)
         ngx_log_debug1(NGX_LOG_DEBUG_CORE, ev->log, 0,
                        "channel command: %ui", ch.command);
 
+        // 区分消息的类型
         switch (ch.command) {
 
+        // 发送了quit，相当于kill -s quit
         case NGX_CMD_QUIT:
             ngx_quit = 1;
             break;
 
+        // 发送了term，相当于kill -s stop
         case NGX_CMD_TERMINATE:
             ngx_terminate = 1;
             break;
 
+        // 重新打开日志文件
         case NGX_CMD_REOPEN:
             ngx_reopen = 1;
             break;
 
+        // 有子进程重启
         case NGX_CMD_OPEN_CHANNEL:
 
             ngx_log_debug3(NGX_LOG_DEBUG_CORE, ev->log, 0,
                            "get channel s:%i pid:%P fd:%d",
                            ch.slot, ch.pid, ch.fd);
 
+            // 在进程数组里填写对应的pid等信息
             ngx_processes[ch.slot].pid = ch.pid;
             ngx_processes[ch.slot].channel[0] = ch.fd;
             break;
 
+        // 有子进程关闭
         case NGX_CMD_CLOSE_CHANNEL:
 
             ngx_log_debug4(NGX_LOG_DEBUG_CORE, ev->log, 0,

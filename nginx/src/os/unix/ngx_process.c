@@ -1,7 +1,10 @@
 // annotated by chrono since 2016
 //
+// * ngx_debug_point
 // * ngx_spawn_process
 // * ngx_signal_handler
+// * ngx_init_signals
+// * ngx_process_get_status
 
 /*
  * Copyright (C) Igor Sysoev
@@ -65,7 +68,8 @@ ngx_socket_t     ngx_channel;
 ngx_int_t        ngx_last_process;
 
 // 创建的进程都在ngx_processes数组里
-// 此数组仅在master进程里使用，worker进程不使用
+// 此数组主要在master进程里使用
+// worker进程也用来维护其他worker进程的状态信息
 ngx_process_t    ngx_processes[NGX_MAX_PROCESSES];
 
 // 命令行-s参数关联数组
@@ -104,6 +108,9 @@ ngx_signal_t  signals[] = {
       "quit",
       ngx_signal_handler },
 
+    // ngx_config.h
+    // #define NGX_CHANGEBIN_SIGNAL     USR2
+    // hot upgrade, kill -s SIGUSR2 masterpid
     { ngx_signal_value(NGX_CHANGEBIN_SIGNAL),
       "SIG" ngx_value(NGX_CHANGEBIN_SIGNAL),
       "",
@@ -335,6 +342,7 @@ ngx_pid_t
 ngx_execute(ngx_cycle_t *cycle, ngx_exec_ctx_t *ctx)
 {
     // 产生进程执行ngx_execute_proc
+    // 不与worker发生关系，没有channel通信
     return ngx_spawn_process(cycle, ngx_execute_proc, ctx, ctx->name,
                              NGX_PROCESS_DETACHED);
 }
@@ -366,6 +374,8 @@ ngx_init_signals(ngx_log_t *log)
     for (sig = signals; sig->signo != 0; sig++) {
         ngx_memzero(&sa, sizeof(struct sigaction));
 
+        // 设置信号处理函数
+        // 大多是ngx_signal_handler
         if (sig->handler) {
             sa.sa_sigaction = sig->handler;
             sa.sa_flags = SA_SIGINFO;
@@ -375,6 +385,8 @@ ngx_init_signals(ngx_log_t *log)
         }
 
         sigemptyset(&sa.sa_mask);
+
+        // 安装信号处理函数
         if (sigaction(sig->signo, &sa, NULL) == -1) {
 #if (NGX_VALGRIND)
             ngx_log_error(NGX_LOG_ALERT, log, ngx_errno,
@@ -460,6 +472,7 @@ ngx_signal_handler(int signo, siginfo_t *siginfo, void *ucontext)
             action = ", reopening logs";
             break;
 
+        // hot upgrade, kill -s SIGUSR2 masterpid
         case ngx_signal_value(NGX_CHANGEBIN_SIGNAL):
             if (ngx_getppid() == ngx_parent || ngx_new_binary > 0) {
 
@@ -475,6 +488,7 @@ ngx_signal_handler(int signo, siginfo_t *siginfo, void *ucontext)
                 break;
             }
 
+            // 标志位，热更新二进制文件
             ngx_change_binary = 1;
             action = ", changing binary";
             break;
@@ -659,6 +673,8 @@ ngx_process_get_status(void)
         }
 
         // 获取子进程的非正常返回值
+        // 如果worker进程使用exit(2)，那么不重启子进程
+        // 在master cycle里的ngx_reap里判断
         if (WEXITSTATUS(status) == 2 && ngx_processes[i].respawn) {
             ngx_log_error(NGX_LOG_ALERT, ngx_cycle->log, 0,
                           "%s %P exited with fatal code %d "
@@ -736,12 +752,15 @@ ngx_debug_point(void)
     switch (ccf->debug_points) {
 
     // stop，使用stop信号停止运行
+    // 之后可以用gdb调试
     case NGX_DEBUG_POINTS_STOP:
         raise(SIGSTOP);
         break;
 
     // 直接abort
+    // 产生coredump，再用gdb调试
     case NGX_DEBUG_POINTS_ABORT:
+        // ngx_config.h:#define ngx_abort       abort
         ngx_abort();
     }
 

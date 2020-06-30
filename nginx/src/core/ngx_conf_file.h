@@ -54,9 +54,10 @@
 #define NGX_DIRECT_CONF      0x00010000
 
 #define NGX_MAIN_CONF        0x01000000     //指令出现在配置文件的最外层
+#define NGX_ANY_CONF         0xFF000000     //指令可以在任意位置出现
+
 
 // in 1.8.1 #define NGX_ANY_CONF         0x0F000000
-#define NGX_ANY_CONF         0x1F000000     //指令可以在任意位置出现
 
 
 
@@ -124,6 +125,9 @@ struct ngx_command_s {
 #define ngx_null_command  { ngx_null_string, 0, NULL, 0, 0, NULL }
 
 
+// typedef struct ngx_open_file_s       ngx_open_file_t;
+// 主要用来管理日志文件
+// 存储在cycle->open_files列表里
 struct ngx_open_file_s {
     ngx_fd_t              fd;
     ngx_str_t             name;
@@ -434,7 +438,10 @@ char *ngx_conf_include(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 ngx_int_t ngx_conf_full_name(ngx_cycle_t *cycle, ngx_str_t *name,
     ngx_uint_t conf_prefix);
 
+// 加入到cycle->open_files链表里
+// 没有打开文件，之后在init_cycle里统一打开
 ngx_open_file_t *ngx_conf_open_file(ngx_cycle_t *cycle, ngx_str_t *name);
+
 void ngx_cdecl ngx_conf_log_error(ngx_uint_t level, ngx_conf_t *cf,
     ngx_err_t err, const char *fmt, ...);
 

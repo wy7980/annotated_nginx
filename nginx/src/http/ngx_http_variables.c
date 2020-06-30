@@ -1,6 +1,7 @@
 // annotated by chrono since 2016
 //
 // * ngx_http_add_variable
+// * ngx_http_get_variable
 // * ngx_http_variables_init_vars
 
 /*
@@ -28,8 +29,6 @@ static void ngx_http_variable_request_set(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 #endif
 static ngx_int_t ngx_http_variable_request_get_size(ngx_http_request_t *r,
-    ngx_http_variable_value_t *v, uintptr_t data);
-static void ngx_http_variable_request_set_size(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_http_variable_header(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
@@ -131,6 +130,8 @@ static ngx_int_t ngx_http_variable_sent_keep_alive(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
 static ngx_int_t ngx_http_variable_sent_transfer_encoding(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
+static void ngx_http_variable_set_limit_rate(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data);
 
 static ngx_int_t ngx_http_variable_connection(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data);
@@ -206,10 +207,20 @@ static ngx_http_variable_t  ngx_http_core_variables[] = {
     { ngx_string("remote_port"), NULL, ngx_http_variable_remote_port, 0, 0, 0 },
 
     { ngx_string("proxy_protocol_addr"), NULL,
-      ngx_http_variable_proxy_protocol_addr, 0, 0, 0 },
+      ngx_http_variable_proxy_protocol_addr,
+      offsetof(ngx_proxy_protocol_t, src_addr), 0, 0 },
 
     { ngx_string("proxy_protocol_port"), NULL,
-      ngx_http_variable_proxy_protocol_port, 0, 0, 0 },
+      ngx_http_variable_proxy_protocol_port,
+      offsetof(ngx_proxy_protocol_t, src_port), 0, 0 },
+
+    { ngx_string("proxy_protocol_server_addr"), NULL,
+      ngx_http_variable_proxy_protocol_addr,
+      offsetof(ngx_proxy_protocol_t, dst_addr), 0, 0 },
+
+    { ngx_string("proxy_protocol_server_port"), NULL,
+      ngx_http_variable_proxy_protocol_port,
+      offsetof(ngx_proxy_protocol_t, dst_port), 0, 0 },
 
     { ngx_string("server_addr"), NULL, ngx_http_variable_server_addr, 0, 0, 0 },
 
@@ -328,7 +339,7 @@ static ngx_http_variable_t  ngx_http_core_variables[] = {
     { ngx_string("sent_http_link"), NULL, ngx_http_variable_headers,
       offsetof(ngx_http_request_t, headers_out.link), 0, 0 },
 
-    { ngx_string("limit_rate"), ngx_http_variable_request_set_size,
+    { ngx_string("limit_rate"), ngx_http_variable_set_limit_rate,
       ngx_http_variable_request_get_size,
       offsetof(ngx_http_request_t, limit_rate),
       NGX_HTTP_VAR_CHANGEABLE|NGX_HTTP_VAR_NOCACHEABLE, 0 },
@@ -430,6 +441,7 @@ ngx_http_add_variable(ngx_conf_t *cf, ngx_str_t *name, ngx_uint_t flags)
     // 但如果是changeable的是可以的
     key = cmcf->variables_keys->keys.elts;
     for (i = 0; i < cmcf->variables_keys->keys.nelts; i++) {
+        // 大小写无关比较变量名
         if (name->len != key[i].key.len
             || ngx_strncasecmp(name->data, key[i].key.data, name->len) != 0)
         {
@@ -445,6 +457,8 @@ ngx_http_add_variable(ngx_conf_t *cf, ngx_str_t *name, ngx_uint_t flags)
             return NULL;
         }
 
+        // 标志位去掉weak
+        // 如果没有weak，则设置除weak外的所有位
         if (!(flags & NGX_HTTP_VAR_WEAK)) {
             v->flags &= ~NGX_HTTP_VAR_WEAK;
         }
@@ -478,7 +492,7 @@ ngx_http_add_variable(ngx_conf_t *cf, ngx_str_t *name, ngx_uint_t flags)
     v->flags = flags;
     v->index = 0;
 
-    // 把变量的hash key加入查找数组，方便之后查找
+    // 把变量的hash key加入查找数组，方便之后建立散列表查找
     rc = ngx_hash_add_key(cmcf->variables_keys, &v->name, v, 0);
 
     if (rc == NGX_ERROR) {
@@ -506,12 +520,15 @@ ngx_http_add_prefix_variable(ngx_conf_t *cf, ngx_str_t *name, ngx_uint_t flags)
     ngx_http_variable_t        *v;
     ngx_http_core_main_conf_t  *cmcf;
 
+    // 取core配置
     cmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_core_module);
 
     // 在数组里查找是否已经有变量
     // 有则返回，否则添加进数组
+    // 注意是prefix_variables
     v = cmcf->prefix_variables.elts;
     for (i = 0; i < cmcf->prefix_variables.nelts; i++) {
+        // 大小写无关比较变量名
         if (name->len != v[i].name.len
             || ngx_strncasecmp(name->data, v[i].name.data, name->len) != 0)
         {
@@ -527,6 +544,7 @@ ngx_http_add_prefix_variable(ngx_conf_t *cf, ngx_str_t *name, ngx_uint_t flags)
         }
 
         // 标志位去掉weak
+        // 如果没有weak，则设置除weak外的所有位
         if (!(flags & NGX_HTTP_VAR_WEAK)) {
             v->flags &= ~NGX_HTTP_VAR_WEAK;
         }
@@ -871,32 +889,6 @@ ngx_http_variable_request_get_size(ngx_http_request_t *r,
 }
 
 
-static void
-ngx_http_variable_request_set_size(ngx_http_request_t *r,
-    ngx_http_variable_value_t *v, uintptr_t data)
-{
-    ssize_t    s, *sp;
-    ngx_str_t  val;
-
-    val.len = v->len;
-    val.data = v->data;
-
-    s = ngx_parse_size(&val);
-
-    if (s == NGX_ERROR) {
-        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
-                      "invalid size \"%V\"", &val);
-        return;
-    }
-
-    sp = (ssize_t *) ((char *) r + data);
-
-    *sp = s;
-
-    return;
-}
-
-
 static ngx_int_t
 ngx_http_variable_header(ngx_http_request_t *r, ngx_http_variable_value_t *v,
     uintptr_t data)
@@ -1174,7 +1166,7 @@ ngx_http_variable_argument(ngx_http_request_t *r, ngx_http_variable_value_t *v,
     len = name->len - (sizeof("arg_") - 1);
     arg = name->data + sizeof("arg_") - 1;
 
-    if (ngx_http_arg(r, arg, len, &value) != NGX_OK) {
+    if (len == 0 || ngx_http_arg(r, arg, len, &value) != NGX_OK) {
         v->not_found = 1;
         return NGX_OK;
     }
@@ -1402,11 +1394,22 @@ static ngx_int_t
 ngx_http_variable_proxy_protocol_addr(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data)
 {
-    v->len = r->connection->proxy_protocol_addr.len;
+    ngx_str_t             *addr;
+    ngx_proxy_protocol_t  *pp;
+
+    pp = r->connection->proxy_protocol;
+    if (pp == NULL) {
+        v->not_found = 1;
+        return NGX_OK;
+    }
+
+    addr = (ngx_str_t *) ((char *) pp + data);
+
+    v->len = addr->len;
     v->valid = 1;
     v->no_cacheable = 0;
     v->not_found = 0;
-    v->data = r->connection->proxy_protocol_addr.data;
+    v->data = addr->data;
 
     return NGX_OK;
 }
@@ -1416,7 +1419,14 @@ static ngx_int_t
 ngx_http_variable_proxy_protocol_port(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data)
 {
-    ngx_uint_t  port;
+    ngx_uint_t             port;
+    ngx_proxy_protocol_t  *pp;
+
+    pp = r->connection->proxy_protocol;
+    if (pp == NULL) {
+        v->not_found = 1;
+        return NGX_OK;
+    }
 
     v->len = 0;
     v->valid = 1;
@@ -1428,7 +1438,7 @@ ngx_http_variable_proxy_protocol_port(ngx_http_request_t *r,
         return NGX_ERROR;
     }
 
-    port = r->connection->proxy_protocol_port;
+    port = *(in_port_t *) ((char *) pp + data);
 
     if (port > 0 && port < 65536) {
         v->len = ngx_sprintf(v->data, "%ui", port) - v->data;
@@ -2076,6 +2086,29 @@ ngx_http_variable_sent_transfer_encoding(ngx_http_request_t *r,
 }
 
 
+static void
+ngx_http_variable_set_limit_rate(ngx_http_request_t *r,
+    ngx_http_variable_value_t *v, uintptr_t data)
+{
+    ssize_t    s;
+    ngx_str_t  val;
+
+    val.len = v->len;
+    val.data = v->data;
+
+    s = ngx_parse_size(&val);
+
+    if (s == NGX_ERROR) {
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
+                      "invalid $limit_rate \"%V\"", &val);
+        return;
+    }
+
+    r->limit_rate = s;
+    r->limit_rate_set = 1;
+}
+
+
 static ngx_int_t
 ngx_http_variable_request_completion(ngx_http_request_t *r,
     ngx_http_variable_value_t *v, uintptr_t data)
@@ -2587,7 +2620,9 @@ ngx_http_regex_exec(ngx_http_request_t *r, ngx_http_regex_t *re, ngx_str_t *s)
     if (re->ncaptures) {
         len = cmcf->ncaptures;
 
-        if (r->captures == NULL) {
+        if (r->captures == NULL || r->realloc_captures) {
+            r->realloc_captures = 0;
+
             r->captures = ngx_palloc(r->pool, len * sizeof(int));
             if (r->captures == NULL) {
                 return NGX_ERROR;
@@ -2729,19 +2764,25 @@ ngx_http_variables_init_vars(ngx_conf_t *cf)
 
                 av->index = i;
 
+                // 没有get handler或者是weak
                 if (av->get_handler == NULL
                     || (av->flags & NGX_HTTP_VAR_WEAK))
                 {
+                    // 跳出本循环
                     break;
                 }
 
+                // 跳回最上层循环continue
                 goto next;
             }
         }
 
+        // 没有get handler或者是weak
+
         len = 0;
         av = NULL;
 
+        // 为有前缀的变量设置get handler
         for (n = 0; n < cmcf->prefix_variables.nelts; n++) {
             if (v[i].name.len >= pv[n].name.len && v[i].name.len > len
                 && ngx_strncmp(v[i].name.data, pv[n].name.data, pv[n].name.len)
@@ -2757,9 +2798,11 @@ ngx_http_variables_init_vars(ngx_conf_t *cf)
             v[i].data = (uintptr_t) &v[i].name;
             v[i].flags = av->flags;
 
+            // 跳回最上层循环continue
             goto next;
         }
 
+        // 没有get handler则报错，无法处理变量
         if (v[i].get_handler == NULL) {
             ngx_log_error(NGX_LOG_EMERG, cf->log, 0,
                           "unknown \"%V\" variable", &v[i].name);

@@ -1,6 +1,7 @@
 // annotated by chrono since 2016
 //
 // * ngx_process_events_and_timers
+// * ngx_event_module_init
 // * ngx_event_process_init
 // * ngx_handle_read_event
 // * ngx_handle_write_event
@@ -425,6 +426,12 @@ ngx_process_events_and_timers(ngx_cycle_t *cycle)
     // 不管是否获得了负载均衡锁，都要处理事件和定时器
     // 如果获得了负载均衡锁,事件就会多出一个accept事件
     // 否则只有普通的读写事件和定时器事件
+
+    // 1.17.5新增,处理ngx_posted_next_events
+    if (!ngx_queue_empty(&ngx_posted_next_events)) {
+        ngx_event_move_posted_next(cycle);
+        timer = 0;
+    }
 
     // 获取当前的时间，毫秒数
     delta = ngx_current_msec;
@@ -949,6 +956,7 @@ ngx_event_process_init(ngx_cycle_t *cycle)
 
     // 初始化两个延后处理的事件队列
     ngx_queue_init(&ngx_posted_accept_events);
+    ngx_queue_init(&ngx_posted_next_events);
     ngx_queue_init(&ngx_posted_events);
 
     // 初始化定时器红黑树

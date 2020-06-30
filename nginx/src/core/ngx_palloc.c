@@ -3,6 +3,7 @@
 // * ngx_create_pool
 // * ngx_palloc_small
 // * ngx_palloc_large
+// * ngx_palloc_block
 
 /*
  * Copyright (C) Igor Sysoev
@@ -13,6 +14,10 @@
 #include <ngx_config.h>
 #include <ngx_core.h>
 
+// 如果编译时指定宏NGX_DEBUG_PALLOC
+// 则不会启用内存池机制，都使用malloc分配内存
+// 方便使用valgrind等来检测内存问题
+// 此宏自1.9.x开始出现
 
 // 在本内存池内分配小块内存
 // 不超过NGX_MAX_ALLOC_FROM_POOL,即4k-1
@@ -26,6 +31,7 @@ static ngx_inline void *ngx_palloc_small(ngx_pool_t *pool, size_t size,
 static void *ngx_palloc_block(ngx_pool_t *pool, size_t size);
 
 // 分配大块内存(>4k),直接调用malloc
+// 挂到大块链表里方便后续的回收
 static void *ngx_palloc_large(ngx_pool_t *pool, size_t size);
 
 
@@ -76,6 +82,9 @@ ngx_create_pool(size_t size, ngx_log_t *log)
 
 
 // 销毁内存池
+// 调用清理函数链表
+// 检查大块内存链表，直接free
+// 遍历内存池节点，逐个free
 void
 ngx_destroy_pool(ngx_pool_t *pool)
 {
@@ -134,7 +143,11 @@ ngx_destroy_pool(ngx_pool_t *pool)
 }
 
 
-// 重置内存池，释放内存
+// 重置内存池，释放内存，但没有free归还给系统
+// 之前已经分配的内存块仍然保留
+// 遍历内存池节点，逐个重置空闲指针位置
+// 注意cleanup链表没有清空
+// 只有destroy时才会销毁
 void
 ngx_reset_pool(ngx_pool_t *pool)
 {
@@ -150,6 +163,10 @@ ngx_reset_pool(ngx_pool_t *pool)
 
     // 遍历内存池节点，逐个重置空闲指针位置
     // 相当于释放了已经分配的内存
+    //
+    // 这里有一个问题，其他节点的块实际上只用了ngx_pool_data_t
+    // reset指针移动了ngx_pool_t大小
+    // 就浪费了80-32字节的内存
     for (p = pool; p; p = p->d.next) {
         p->d.last = (u_char *) p + sizeof(ngx_pool_t);
         p->d.failed = 0;
@@ -161,6 +178,9 @@ ngx_reset_pool(ngx_pool_t *pool)
     // 指针置空，之前的内存都已经释放了
     pool->chain = NULL;
     pool->large = NULL;
+
+    // 注意cleanup链表没有清空
+    // 只有destroy时才会销毁
 }
 
 
@@ -176,7 +196,7 @@ ngx_palloc(ngx_pool_t *pool, size_t size)
     }
 #endif
 
-    // 分配大块内存(>4k)
+    // 分配大块内存(>4k),直接调用malloc
     return ngx_palloc_large(pool, size);
 }
 
@@ -193,7 +213,7 @@ ngx_pnalloc(ngx_pool_t *pool, size_t size)
     }
 #endif
 
-    // 分配大块内存(>4k)
+    // 分配大块内存(>4k),直接调用malloc
     return ngx_palloc_large(pool, size);
 }
 
@@ -306,6 +326,7 @@ ngx_palloc_block(ngx_pool_t *pool, size_t size)
 
 
 // 分配大块内存(>4k),直接调用malloc
+// 挂到大块链表里方便后续的回收
 // 所以可以用jemalloc来优化
 static void *
 ngx_palloc_large(ngx_pool_t *pool, size_t size)
@@ -331,6 +352,7 @@ ngx_palloc_large(ngx_pool_t *pool, size_t size)
         }
 
         // 只找三次，避免低效查找
+        // 3是一个“经验”数据
         if (n++ > 3) {
             break;
         }
@@ -397,6 +419,8 @@ ngx_pfree(ngx_pool_t *pool, void *p)
             ngx_log_debug1(NGX_LOG_DEBUG_ALLOC, pool->log, 0,
                            "free: %p", l->alloc);
             ngx_free(l->alloc);
+
+            // 指针置为空，之后可以复用节点
             l->alloc = NULL;
 
             return NGX_OK;

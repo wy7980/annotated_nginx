@@ -4,6 +4,8 @@
 // * ngx_cpymem
 // * ngx_sprintf
 // * ngx_atoi
+// * ngx_cpystrn
+// * ngx_rstrncmp
 
 /*
  * Copyright (C) Igor Sysoev
@@ -33,7 +35,7 @@ typedef struct {
 } ngx_keyval_t;
 
 
-// nginx变量值，目前仅用于http模块
+// nginx变量值，用于http/stream模块
 typedef struct {
     unsigned    len:28;             //字符串长度，只有28位，剩下4位留给标志位
 
@@ -64,19 +66,26 @@ typedef struct {
 #define ngx_tolower(c)      (u_char) ((c >= 'A' && c <= 'Z') ? (c | 0x20) : c)
 #define ngx_toupper(c)      (u_char) ((c >= 'a' && c <= 'z') ? (c & ~0x20) : c)
 
+// 小写化字符串到dst
 void ngx_strlow(u_char *dst, u_char *src, size_t n);
 
 
+// 字符串比较，带长度
 #define ngx_strncmp(s1, s2, n)  strncmp((const char *) s1, (const char *) s2, n)
 
 
+// 字符串比较，不带长度
 /* msvc and icc7 compile strcmp() to inline loop */
 #define ngx_strcmp(s1, s2)  strcmp((const char *) s1, (const char *) s2)
 
 
+// 查找子串
 #define ngx_strstr(s1, s2)  strstr((const char *) s1, (const char *) s2)
+
+// 字符串长度
 #define ngx_strlen(s)       strlen((const char *) s)
 
+// 字符串长度，最多n个字符查找
 size_t ngx_strnlen(u_char *p, size_t n);
 
 #define ngx_strchr(s1, c)   strchr((const char *) s1, (int) c)
@@ -105,6 +114,9 @@ ngx_strlchr(u_char *p, u_char *last, u_char c)
 // 内存清零和设置内存，简单的宏替换
 #define ngx_memzero(buf, n)       (void) memset(buf, 0, n)
 #define ngx_memset(buf, c, n)     (void) memset(buf, c, n)
+
+// 1.15.7新增，多了memory barrier
+void ngx_explicit_memzero(void *buf, size_t n);
 
 
 // 内存拷贝，应该使用ngx_copy或者ngx_cpymem
@@ -158,6 +170,8 @@ ngx_copy(u_char *dst, u_char *src, size_t len)
 #endif
 
 
+// 内存移动，应该使用ngx_movemem
+// 与c函数不一样，它返回移动后的地址，可以简化连续移动内存
 #define ngx_memmove(dst, src, n)   (void) memmove(dst, src, n)
 #define ngx_movemem(dst, src, n)   (((u_char *) memmove(dst, src, n)) + (n))
 
@@ -167,6 +181,8 @@ ngx_copy(u_char *dst, u_char *src, size_t len)
 
 
 // 拷贝字符串
+// 保证在末尾添加'\0'
+// 与ngx_cpymem一样，返回拷贝后的末尾位置
 u_char *ngx_cpystrn(u_char *dst, u_char *src, size_t n);
 
 //在内存池里复制一个新的字符串
@@ -183,19 +199,29 @@ u_char *ngx_vslprintf(u_char *buf, u_char *last, const char *fmt, va_list args);
 #define ngx_vsnprintf(buf, max, fmt, args)                                   \
     ngx_vslprintf(buf, buf + (max), fmt, args)
 
+// 大小写无关比较
 ngx_int_t ngx_strcasecmp(u_char *s1, u_char *s2);
 ngx_int_t ngx_strncasecmp(u_char *s1, u_char *s2, size_t n);
 
+// 在len长度里查找子串，类似strstr
 u_char *ngx_strnstr(u_char *s1, char *s2, size_t n);
 
+// 已知s2的长度查找子串，n必须是strlen(s2)-1
 u_char *ngx_strstrn(u_char *s1, char *s2, size_t n);
 u_char *ngx_strcasestrn(u_char *s1, char *s2, size_t n);
 u_char *ngx_strlcasestrn(u_char *s1, u_char *last, u_char *s2, size_t n);
 
+// 反向比较字符串，有的时候很有用
 ngx_int_t ngx_rstrncmp(u_char *s1, u_char *s2, size_t n);
 ngx_int_t ngx_rstrncasecmp(u_char *s1, u_char *s2, size_t n);
+
+// 已知长度内存比较
 ngx_int_t ngx_memn2cmp(u_char *s1, u_char *s2, size_t n1, size_t n2);
+
+// 比较dns字符串，对-.做特殊处理
 ngx_int_t ngx_dns_strcmp(u_char *s1, u_char *s2);
+
+// 比较文件名字符串，对/做特殊处理
 ngx_int_t ngx_filename_cmp(u_char *s1, u_char *s2, size_t n);
 
 // 字符串转换为数字

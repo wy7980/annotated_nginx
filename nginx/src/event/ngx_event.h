@@ -120,6 +120,7 @@ struct ngx_event_s {
     unsigned         channel:1;
     unsigned         resolver:1;
 
+    // 在进程退出时定时器是否可以忽略
     unsigned         cancelable:1;
 
 #if (NGX_HAVE_KQUEUE)
@@ -137,24 +138,17 @@ struct ngx_event_s {
      *   write:      available space in buffer when event is ready
      *               or lowat when event is set with NGX_LOWAT_EVENT flag
      *
-     * epoll with EPOLLRDHUP:
-     *   accept:     1 if accept many, 0 otherwise
-     *   read:       1 if there can be data to read, 0 otherwise
-     *
      * iocp: TODO
      *
      * otherwise:
      *   accept:     1 if accept many, 0 otherwise
+     *   read:       bytes to read when event is ready, -1 if not known
      */
 
-#if (NGX_HAVE_KQUEUE) || (NGX_HAVE_IOCP)
-    int              available;
-#else
     // 是否尽可能多地接受请求建立连接，即multi_accept
     // 1.11.x后增加新用途，在接收数据时标记是否可用
-    // 注意这里使用了bit field，只能存储0/1，节约内存
-    unsigned         available:1;
-#endif
+    // 早期（< 1.17.4）这里使用了bit field，只能存储0/1，节约内存
+    int              available;
 
     // 重要！！
     // 事件发生时调用的函数
@@ -718,10 +712,11 @@ extern ngx_module_t           ngx_event_core_module;
 
 
 // 函数宏，从cycle的conf_ctx里获得event模块的指针，然后再取数组序号
-// 此处有隐患，宏末尾多了分号，如果用在函数里就会编译失败
+// 1.15.6之前有隐患，宏末尾多了分号，如果用在函数里就会编译失败
 // 应该是个小bug，其他的xxx_get_conf没有分号
+// 1.15.6修复
 #define ngx_event_get_conf(conf_ctx, module)                                  \
-             (*(ngx_get_conf(conf_ctx, ngx_events_module))) [module.ctx_index];
+             (*(ngx_get_conf(conf_ctx, ngx_events_module))) [module.ctx_index]
 
 
 
@@ -738,6 +733,10 @@ void ngx_event_recvmsg(ngx_event_t *ev);
 void ngx_udp_rbtree_insert_value(ngx_rbtree_node_t *temp,
     ngx_rbtree_node_t *node, ngx_rbtree_node_t *sentinel);
 #endif
+
+// 1.15.7改为非static
+// 清理函数，会删除红黑树节点
+void ngx_delete_udp_connection(void *data);
 
 // 尝试获取负载均衡锁，监听端口
 // 如未获取则不监听端口

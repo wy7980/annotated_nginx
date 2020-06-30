@@ -98,6 +98,8 @@ struct ngx_peer_connection_s {
     // 连接是否已经缓存
     unsigned                         cached:1;
     unsigned                         transparent:1;
+    unsigned                         so_keepalive:1;
+    unsigned                         down:1;
 
                                      /* ngx_connection_log_error_e */
     unsigned                         log_error:2;

@@ -80,6 +80,7 @@ struct ngx_log_s {
     ngx_uint_t           log_level;
 
     // 日志文件对象
+    // 里面有日志的文件名
     ngx_open_file_t     *file;
 
     // 日志关联的连接计数
@@ -87,10 +88,13 @@ struct ngx_log_s {
     ngx_atomic_uint_t    connection;
 
     // 记录写日志磁盘满错误发生的时间
+    // 避免反复写磁盘导致的阻塞
+    // 时间间隔为1秒
     time_t               disk_full_time;
 
     // 记录错误日志时可以执行的回调函数
     // 参数是消息缓冲区里剩余的空间
+    // 定制额外的信息
     // 只有高于debug才会执行
     // 例如ngx_http_log_error
     ngx_log_handler_pt   handler;
@@ -101,7 +105,10 @@ struct ngx_log_s {
 
     // 专用的写函数指针
     // 可以写到syslog或者其他地方
+    // 实现特殊的记录日志动作
     ngx_log_writer_pt    writer;
+
+    // writer相关的数据，需要用户自己管理
     void                *wdata;
 
     /*
@@ -147,7 +154,18 @@ void ngx_log_error_core(ngx_uint_t level, ngx_log_t *log, ngx_err_t err,
 
 // 只有在configure时使用--with-debug才会启用
 // 调试日志宏,级别固定为debug
+// 注意使用&操作检查位
 // 记录日志的条件使用逻辑与操作，检查子系统
+// LOG_DEBUG=DEBUG_ALL=0x7ffffff0
+// 所以在调用log_debug时位操作总成功
+//
+// 调试用的级别，只打印某些特殊子系统的日志
+// 在nginx网站没有很好地文档化
+// ngx_log_set_levels
+// static const char *debug_levels[] = {
+//     "debug_core", "debug_alloc", "debug_mutex", "debug_event",
+//     "debug_http", "debug_mail", "debug_stream"
+// };
 #define ngx_log_debug(level, log, ...)                                        \
     if ((log)->log_level & level)                                             \
         ngx_log_error_core(NGX_LOG_DEBUG, log, __VA_ARGS__)

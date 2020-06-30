@@ -36,6 +36,9 @@ typedef struct {
 #define NGX_HTTP_REQUEST_BODY_FILE_CLEAN  2
 
 
+static ngx_int_t ngx_http_core_auth_delay(ngx_http_request_t *r);
+static void ngx_http_core_auth_delay_handler(ngx_http_request_t *r);
+
 static ngx_int_t ngx_http_core_find_location(ngx_http_request_t *r);
 static ngx_int_t ngx_http_core_find_static_location(ngx_http_request_t *r,
     ngx_http_location_tree_node_t *node);
@@ -581,7 +584,7 @@ static ngx_command_t  ngx_http_core_commands[] = {
     { ngx_string("limit_rate"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_HTTP_LIF_CONF
                         |NGX_CONF_TAKE1,
-      ngx_conf_set_size_slot,
+      ngx_http_set_complex_value_size_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_core_loc_conf_t, limit_rate),
       NULL },
@@ -591,7 +594,7 @@ static ngx_command_t  ngx_http_core_commands[] = {
     { ngx_string("limit_rate_after"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_HTTP_LIF_CONF
                         |NGX_CONF_TAKE1,
-      ngx_conf_set_size_slot,
+      ngx_http_set_complex_value_size_slot,
       NGX_HTTP_LOC_CONF_OFFSET,
       offsetof(ngx_http_core_loc_conf_t, limit_rate_after),
       NULL },
@@ -621,6 +624,8 @@ static ngx_command_t  ngx_http_core_commands[] = {
       offsetof(ngx_http_core_loc_conf_t, keepalive_disable),
       &ngx_http_core_keepalive_disable },
 
+    // 1.10 no satisfy_any
+
     { ngx_string("satisfy"),
       NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
       ngx_conf_set_enum_slot,
@@ -628,7 +633,13 @@ static ngx_command_t  ngx_http_core_commands[] = {
       offsetof(ngx_http_core_loc_conf_t, satisfy),
       &ngx_http_core_satisfy },
 
-    // 1.10 no satisfy_any
+    // 1.17.10
+    { ngx_string("auth_delay"),
+      NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+      ngx_conf_set_msec_slot,
+      NGX_HTTP_LOC_CONF_OFFSET,
+      offsetof(ngx_http_core_loc_conf_t, auth_delay),
+      NULL },
 
     // 不允许重复，设置location的internal标志
     // 在ngx_http_core_find_config_phase里检查
@@ -1120,7 +1131,7 @@ ngx_http_core_rewrite_phase(ngx_http_request_t *r, ngx_http_phase_handler_t *ph)
     // 调用每个模块自己的处理函数
     rc = ph->handler(r);
 
-    // 模块handler返回decline，表示不处理
+    // 模块handler返回decline，表示成功
     if (rc == NGX_DECLINED) {
         // 继续在本阶段（rewrite）里查找下一个模块
         // 索引加1
@@ -1329,6 +1340,7 @@ ngx_http_core_access_phase(ngx_http_request_t *r, ngx_http_phase_handler_t *ph)
     ngx_http_core_loc_conf_t  *clcf;
 
     // 子请求不做访问控制，直接跳过本阶段
+    // 因为这是内部的请求，不需要访问控制
     // 注意不是++，而是next
     if (r != r->main) {
         r->phase_handler = ph->next;
@@ -1406,6 +1418,10 @@ ngx_http_core_access_phase(ngx_http_request_t *r, ngx_http_phase_handler_t *ph)
 
     /* rc == NGX_ERROR || rc == NGX_HTTP_...  */
 
+    if (rc == NGX_HTTP_UNAUTHORIZED) {
+        return ngx_http_core_auth_delay(r);
+    }
+
     // 其他的错误，见上nginx注释
 
     // 结束请求
@@ -1430,12 +1446,17 @@ ngx_http_core_post_access_phase(ngx_http_request_t *r,
     access_code = r->access_code;
 
     if (access_code) {
+        r->access_code = 0;
+
         if (access_code == NGX_HTTP_FORBIDDEN) {
             ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
                           "access forbidden by rule");
         }
 
-        r->access_code = 0;
+        if (access_code == NGX_HTTP_UNAUTHORIZED) {
+            return ngx_http_core_auth_delay(r);
+        }
+
         ngx_http_finalize_request(r, access_code);
         return NGX_OK;
     }
@@ -1662,6 +1683,65 @@ ngx_http_core_post_access_phase(ngx_http_request_t *r,
 //}
 
 
+static ngx_int_t
+ngx_http_core_auth_delay(ngx_http_request_t *r)
+{
+    ngx_http_core_loc_conf_t  *clcf;
+
+    clcf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
+
+    if (clcf->auth_delay == 0) {
+        ngx_http_finalize_request(r, NGX_HTTP_UNAUTHORIZED);
+        return NGX_OK;
+    }
+
+    ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
+                  "delaying unauthorized request");
+
+    if (ngx_handle_read_event(r->connection->read, 0) != NGX_OK) {
+        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    }
+
+    r->read_event_handler = ngx_http_test_reading;
+    r->write_event_handler = ngx_http_core_auth_delay_handler;
+
+    r->connection->write->delayed = 1;
+    ngx_add_timer(r->connection->write, clcf->auth_delay);
+
+    /*
+     * trigger an additional event loop iteration
+     * to ensure constant-time processing
+     */
+
+    ngx_post_event(r->connection->write, &ngx_posted_next_events);
+
+    return NGX_OK;
+}
+
+
+static void
+ngx_http_core_auth_delay_handler(ngx_http_request_t *r)
+{
+    ngx_event_t  *wev;
+
+    ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+                   "auth delay handler");
+
+    wev = r->connection->write;
+
+    if (wev->delayed) {
+
+        if (ngx_handle_write_event(wev, 0) != NGX_OK) {
+            ngx_http_finalize_request(r, NGX_HTTP_INTERNAL_SERVER_ERROR);
+        }
+
+        return;
+    }
+
+    ngx_http_finalize_request(r, NGX_HTTP_UNAUTHORIZED);
+}
+
+
 // 处理请求，产生响应内容，最常用的阶段
 // 这已经是处理的最后阶段了（log阶段不处理请求，不算）
 // 设置写事件为ngx_http_request_empty_handler
@@ -1836,9 +1916,9 @@ ngx_http_update_location_config(ngx_http_request_t *r)
         r->connection->tcp_nopush = NGX_TCP_NOPUSH_DISABLED;
     }
 
-    if (r->limit_rate == 0) {
-        r->limit_rate = clcf->limit_rate;
-    }
+    //if (r->limit_rate == 0) {
+    //    r->limit_rate = clcf->limit_rate;
+    //}
 
     // 注意这里，设置了请求在location里的专用处理handler
     if (clcf->handler) {
@@ -2138,6 +2218,7 @@ ngx_http_set_exten(ngx_http_request_t *r)
 }
 
 
+// 计算etag
 ngx_int_t
 ngx_http_set_etag(ngx_http_request_t *r)
 {
@@ -2150,31 +2231,41 @@ ngx_http_set_etag(ngx_http_request_t *r)
         return NGX_OK;
     }
 
+    // 添加一个头
     etag = ngx_list_push(&r->headers_out.headers);
     if (etag == NULL) {
         return NGX_ERROR;
     }
 
+    // hash=1表示启用头
     etag->hash = 1;
+
+    // 设置key
     ngx_str_set(&etag->key, "ETag");
 
+    // 分配value的内存,off_t+time_t的长度再加3
     etag->value.data = ngx_pnalloc(r->pool, NGX_OFF_T_LEN + NGX_TIME_T_LEN + 3);
     if (etag->value.data == NULL) {
         etag->hash = 0;
         return NGX_ERROR;
     }
 
+    // 打印字符串作为etag
+    // 修改时间+长度，然后有两个引号和‘-’
     etag->value.len = ngx_sprintf(etag->value.data, "\"%xT-%xO\"",
                                   r->headers_out.last_modified_time,
                                   r->headers_out.content_length_n)
                       - etag->value.data;
 
+    // 最后设置输出头的指针关联
     r->headers_out.etag = etag;
 
     return NGX_OK;
 }
 
 
+// 弱etag，多了个“W/”
+// 参考ngx_http_image_filter_module
 void
 ngx_http_weak_etag(ngx_http_request_t *r)
 {
@@ -2188,6 +2279,7 @@ ngx_http_weak_etag(ngx_http_request_t *r)
         return;
     }
 
+    // 已经是弱etag则不处理
     if (etag->value.len > 2
         && etag->value.data[0] == 'W'
         && etag->value.data[1] == '/')
@@ -2201,6 +2293,7 @@ ngx_http_weak_etag(ngx_http_request_t *r)
         return;
     }
 
+    // 多分配两个字符
     p = ngx_pnalloc(r->pool, etag->value.len + 2);
     if (p == NULL) {
         r->headers_out.etag->hash = 0;
@@ -2208,6 +2301,7 @@ ngx_http_weak_etag(ngx_http_request_t *r)
         return;
     }
 
+    // 添加“w/”即可
     len = ngx_sprintf(p, "W/%V", &etag->value) - p;
 
     etag->value.data = p;
@@ -2226,8 +2320,10 @@ ngx_http_send_response(ngx_http_request_t *r, ngx_uint_t status,
     ngx_chain_t   out;
 
     // 这时已经不需要body了，所以丢弃
-    if (ngx_http_discard_request_body(r) != NGX_OK) {
-        return NGX_HTTP_INTERNAL_SERVER_ERROR;
+    rc = ngx_http_discard_request_body(r);
+
+    if (rc != NGX_OK) {
+        return rc;
     }
 
     // 设置响应头里的状态码
@@ -2438,7 +2534,8 @@ ngx_http_map_uri_to_path(ngx_http_request_t *r, ngx_str_t *path,
         }
     }
 
-    last = ngx_cpystrn(last, r->uri.data + alias, r->uri.len - alias + 1);
+    last = ngx_copy(last, r->uri.data + alias, r->uri.len - alias);
+    *last = '\0';
 
     return last;
 }
@@ -2518,6 +2615,8 @@ ngx_http_auth_basic_user(ngx_http_request_t *r)
 
 #if (NGX_HTTP_GZIP)
 
+// 检查accept_encoding
+// 决定是否可以gzip
 ngx_int_t
 ngx_http_gzip_ok(ngx_http_request_t *r)
 {
@@ -2527,17 +2626,22 @@ ngx_http_gzip_ok(ngx_http_request_t *r)
     ngx_table_elt_t           *e, *d, *ae;
     ngx_http_core_loc_conf_t  *clcf;
 
+    // 避免重复检测
     r->gzip_tested = 1;
 
+    // 子请求不处理
     if (r != r->main) {
         return NGX_DECLINED;
     }
 
+    // 取accept_encoding
+    // 没有则不gzip
     ae = r->headers_in.accept_encoding;
     if (ae == NULL) {
         return NGX_DECLINED;
     }
 
+    // 长度不等于gzip
     if (ae->value.len < sizeof("gzip") - 1) {
         return NGX_DECLINED;
     }
@@ -2551,7 +2655,9 @@ ngx_http_gzip_ok(ngx_http_request_t *r)
      *   Opera:   "gzip, deflate"
      */
 
+    // 优化，通常gzip都是第一个选项
     if (ngx_memcmp(ae->value.data, "gzip,", 5) != 0
+        // 否则再字符串比较查找，判断qvalue
         && ngx_http_gzip_accept_encoding(&ae->value) != NGX_OK)
     {
         return NGX_DECLINED;
@@ -2559,10 +2665,12 @@ ngx_http_gzip_ok(ngx_http_request_t *r)
 
     clcf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
 
+    // ie6特殊
     if (r->headers_in.msie6 && clcf->gzip_disable_msie6) {
         return NGX_DECLINED;
     }
 
+    // 指令的版本设置
     if (r->http_version < clcf->gzip_http_version) {
         return NGX_DECLINED;
     }
@@ -2811,6 +2919,10 @@ ngx_http_gzip_quantity(u_char *p, u_char *last)
 
 
 // 创建子请求
+// r是当前请求，也就是父请求
+// uri是本server{}里的其他location，不能用@开头
+// psr是传出的创建好的子请求
+// ps子请求结束后的回调函数
 ngx_int_t
 ngx_http_subrequest(ngx_http_request_t *r,
     ngx_str_t *uri, ngx_str_t *args, ngx_http_request_t **psr,
@@ -2822,6 +2934,8 @@ ngx_http_subrequest(ngx_http_request_t *r,
     ngx_http_core_srv_conf_t      *cscf;
     ngx_http_postponed_request_t  *pr, *p;
 
+    // 首先检查本请求的子请求层次
+    // 减到0即已经50层调用了，不能再创建
     if (r->subrequests == 0) {
         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
                       "subrequests cycle while processing \"%V\"", uri);
@@ -2831,6 +2945,9 @@ ngx_http_subrequest(ngx_http_request_t *r,
     /*
      * 1000 is reserved for other purposes.
      */
+    // 使用主请求里的引用计数限制子请求总数
+    // 1000保留给其他关联操作
+    // 子请求数量最多是65535 - 1000
     if (r->main->count >= 65535 - 1000) {
         ngx_log_error(NGX_LOG_CRIT, r->connection->log, 0,
                       "request reference counter overflow "
@@ -2838,27 +2955,34 @@ ngx_http_subrequest(ngx_http_request_t *r,
         return NGX_ERROR;
     }
 
+    // 已经设置标志位，不允许再设置
     if (r->subrequest_in_memory) {
         ngx_log_error(NGX_LOG_ERR, r->connection->log, 0,
                       "nested in-memory subrequest \"%V\"", uri);
         return NGX_ERROR;
     }
 
+    // 创建子请求结构体
     sr = ngx_pcalloc(r->pool, sizeof(ngx_http_request_t));
     if (sr == NULL) {
         return NGX_ERROR;
     }
 
+    // 结构体的“签名”，C程序里的常用手段，用特殊字符来标记结构体
     sr->signature = NGX_HTTP_MODULE;
 
+    // 使用父请求的连接对象
     c = r->connection;
     sr->connection = c;
 
+    // 子请求里模块的ctx
+    // 保存有所有http模块的配置、ctx数据
     sr->ctx = ngx_pcalloc(r->pool, sizeof(void *) * ngx_http_max_module);
     if (sr->ctx == NULL) {
         return NGX_ERROR;
     }
 
+    // 子请求的头初始化
     if (ngx_list_init(&sr->headers_out.headers, r->pool, 20,
                       sizeof(ngx_table_elt_t))
         != NGX_OK)
@@ -2873,31 +2997,45 @@ ngx_http_subrequest(ngx_http_request_t *r,
         return NGX_ERROR;
     }
 
+    // 取出模块的配置
     cscf = ngx_http_get_module_srv_conf(r, ngx_http_core_module);
     sr->main_conf = cscf->ctx->main_conf;
     sr->srv_conf = cscf->ctx->srv_conf;
     sr->loc_conf = cscf->ctx->loc_conf;
 
+    // 使用父请求的内存池
+    // 如果子请求很多，那么内存占用会很大
     sr->pool = r->pool;
 
+    // 直接使用父请求的头
+    // 如果子请求改写头就可能有隐患
     sr->headers_in = r->headers_in;
 
+    // 清除不必要的头
     ngx_http_clear_content_length(sr);
     ngx_http_clear_accept_ranges(sr);
     ngx_http_clear_last_modified(sr);
 
+    // 直接使用父请求的body
     sr->request_body = r->request_body;
 
 #if (NGX_HTTP_V2)
     sr->stream = r->stream;
 #endif
 
+    // 子请求的方法默认是get，但创建后可以改
     sr->method = NGX_HTTP_GET;
+
+    // http版本使用父请求，可以改
     sr->http_version = r->http_version;
 
+    // 请求行复用
     sr->request_line = r->request_line;
+
+    // 设置新的uri，其他的location
     sr->uri = *uri;
 
+    // 附加的额外参数
     if (args) {
         sr->args = *args;
     }
@@ -2905,10 +3043,14 @@ ngx_http_subrequest(ngx_http_request_t *r,
     ngx_log_debug2(NGX_LOG_DEBUG_HTTP, c->log, 0,
                    "http subrequest \"%V?%V\"", uri, &sr->args);
 
+    // 设置subrequest_in_memory
     sr->subrequest_in_memory = (flags & NGX_HTTP_SUBREQUEST_IN_MEMORY) != 0;
+
+    // 新的waited和background标志
     sr->waited = (flags & NGX_HTTP_SUBREQUEST_WAITED) != 0;
     sr->background = (flags & NGX_HTTP_SUBREQUEST_BACKGROUND) != 0;
 
+    // 拷贝其他请求基本参数
     sr->unparsed_uri = r->unparsed_uri;
     sr->method_name = ngx_http_core_get_method;
     sr->http_protocol = r->http_protocol;
@@ -2916,12 +3058,22 @@ ngx_http_subrequest(ngx_http_request_t *r,
 
     ngx_http_set_exten(sr);
 
+    // 主请求必须是唯一的
     sr->main = r->main;
+
+    // 父请求是创建时使用的
     sr->parent = r;
+
+    // 子请求结束后的回调函数
     sr->post_subrequest = ps;
+
+    // 不读取数据
     sr->read_event_handler = ngx_http_request_empty_handler;
+
+    // 跑整个处理流程
     sr->write_event_handler = ngx_http_handler;
 
+    // 变量直接复用父请求，改写也可能有隐患
     sr->variables = r->variables;
 
     sr->log_handler = r->log_handler;
@@ -2930,6 +3082,9 @@ ngx_http_subrequest(ngx_http_request_t *r,
         sr->filter_need_in_memory = 1;
     }
 
+    // 不是在后台，就加入主请求的延后处理队列
+    // 需要完成后由主请求处理
+    // 后台子请求不关心处理结果
     if (!sr->background) {
         if (c->data == r && r->postponed == NULL) {
             c->data = sr;
@@ -2953,6 +3108,7 @@ ngx_http_subrequest(ngx_http_request_t *r,
         }
     }
 
+    // 内部请求标志位
     sr->internal = 1;
 
     sr->discard_body = r->discard_body;
@@ -2960,16 +3116,23 @@ ngx_http_subrequest(ngx_http_request_t *r,
     sr->main_filter_need_in_memory = r->main_filter_need_in_memory;
 
     sr->uri_changes = NGX_HTTP_MAX_URI_CHANGES + 1;
+
+    // 关键点，不是操作主请求，而是操作父请求
+    // 这样子请求的数量就没有限制，只有调用层次的限制
     sr->subrequests = r->subrequests - 1;
 
+    // 重新设置子请求的开始时间
     tp = ngx_timeofday();
     sr->start_sec = tp->sec;
     sr->start_msec = tp->msec;
 
+    // 引用计数增加，对应前面65535 - 1000
     r->main->count++;
 
+    // 输出子请求指针
     *psr = sr;
 
+    // 特殊的clone操作，todo
     if (flags & NGX_HTTP_SUBREQUEST_CLONE) {
         sr->method = r->method;
         sr->method_name = r->method_name;
@@ -2980,13 +3143,24 @@ ngx_http_subrequest(ngx_http_request_t *r,
         sr->phase_handler = r->phase_handler;
         sr->write_event_handler = ngx_http_core_run_phases;
 
+#if (NGX_PCRE)
+        sr->ncaptures = r->ncaptures;
+        sr->captures = r->captures;
+        sr->captures_data = r->captures_data;
+        sr->realloc_captures = 1;
+        r->realloc_captures = 1;
+#endif
+
         ngx_http_update_location_config(sr);
     }
 
+    // 把子请求加入到主请求延后处理链表末尾
+    // 等待引擎调度运行
     return ngx_http_post_request(sr, NULL);
 }
 
 
+// 内部重定向
 ngx_int_t
 ngx_http_internal_redirect(ngx_http_request_t *r,
     ngx_str_t *uri, ngx_str_t *args)
@@ -3254,43 +3428,41 @@ ngx_http_get_forwarded_addr_internal(ngx_http_request_t *r, ngx_addr_t *addr,
     u_char *xff, size_t xfflen, ngx_array_t *proxies, int recursive)
 {
     u_char      *p;
-    ngx_int_t    rc;
     ngx_addr_t   paddr;
+    ngx_uint_t   found;
 
-    if (ngx_cidr_match(addr->sockaddr, proxies) != NGX_OK) {
-        return NGX_DECLINED;
-    }
+    found = 0;
 
-    for (p = xff + xfflen - 1; p > xff; p--, xfflen--) {
-        if (*p != ' ' && *p != ',') {
-            break;
-        }
-    }
+    do {
 
-    for ( /* void */ ; p > xff; p--) {
-        if (*p == ' ' || *p == ',') {
-            p++;
-            break;
-        }
-    }
-
-    if (ngx_parse_addr_port(r->pool, &paddr, p, xfflen - (p - xff)) != NGX_OK) {
-        return NGX_DECLINED;
-    }
-
-    *addr = paddr;
-
-    if (recursive && p > xff) {
-        rc = ngx_http_get_forwarded_addr_internal(r, addr, xff, p - 1 - xff,
-                                                  proxies, 1);
-
-        if (rc == NGX_DECLINED) {
-            return NGX_DONE;
+        if (ngx_cidr_match(addr->sockaddr, proxies) != NGX_OK) {
+            return found ? NGX_DONE : NGX_DECLINED;
         }
 
-        /* rc == NGX_OK || rc == NGX_DONE  */
-        return rc;
-    }
+        for (p = xff + xfflen - 1; p > xff; p--, xfflen--) {
+            if (*p != ' ' && *p != ',') {
+                break;
+            }
+        }
+
+        for ( /* void */ ; p > xff; p--) {
+            if (*p == ' ' || *p == ',') {
+                p++;
+                break;
+            }
+        }
+
+        if (ngx_parse_addr_port(r->pool, &paddr, p, xfflen - (p - xff))
+            != NGX_OK)
+        {
+            return found ? NGX_DONE : NGX_DECLINED;
+        }
+
+        *addr = paddr;
+        found = 1;
+        xfflen = p - 1 - xff;
+
+    } while (recursive && p > xff);
 
     return NGX_OK;
 }
@@ -3309,6 +3481,8 @@ ngx_http_core_server(ngx_conf_t *cf, ngx_command_t *cmd, void *dummy)
 {
     char                        *rv;
     void                        *mconf;
+    size_t                       len;
+    u_char                      *p;
     ngx_uint_t                   i;
     ngx_conf_t                   pcf;
     ngx_http_module_t           *module;
@@ -3429,7 +3603,14 @@ ngx_http_core_server(ngx_conf_t *cf, ngx_command_t *cmd, void *dummy)
     if (rv == NGX_CONF_OK && !cscf->listen) {
         ngx_memzero(&lsopt, sizeof(ngx_http_listen_opt_t));
 
-        sin = &lsopt.sockaddr.sockaddr_in;
+        p = ngx_pcalloc(cf->pool, sizeof(struct sockaddr_in));
+        if (p == NULL) {
+            return NGX_CONF_ERROR;
+        }
+
+        lsopt.sockaddr = (struct sockaddr *) p;
+
+        sin = (struct sockaddr_in *) p;
 
         sin->sin_family = AF_INET;
 #if (NGX_WIN32)
@@ -3452,8 +3633,16 @@ ngx_http_core_server(ngx_conf_t *cf, ngx_command_t *cmd, void *dummy)
 #endif
         lsopt.wildcard = 1;
 
-        (void) ngx_sock_ntop(&lsopt.sockaddr.sockaddr, lsopt.socklen,
-                             lsopt.addr, NGX_SOCKADDR_STRLEN, 1);
+        len = NGX_INET_ADDRSTRLEN + sizeof(":65535") - 1;
+
+        p = ngx_pnalloc(cf->pool, len);
+        if (p == NULL) {
+            return NGX_CONF_ERROR;
+        }
+
+        lsopt.addr_text.data = p;
+        lsopt.addr_text.len = ngx_sock_ntop(lsopt.sockaddr, lsopt.socklen, p,
+                                            len, 1);
 
         if (ngx_http_add_listen(cf, cscf, &lsopt) != NGX_OK) {
             return NGX_CONF_ERROR;
@@ -3537,6 +3726,7 @@ ngx_http_core_location(ngx_conf_t *cf, ngx_command_t *cmd, void *dummy)
     if (cf->args->nelts == 3) {
         // 这里是标识符与名字分离
         // 例如 = root {}
+        // value[1]必须是一个匹配标志符
 
         len = value[1].len;
         mod = value[1].data;
@@ -3595,6 +3785,7 @@ ngx_http_core_location(ngx_conf_t *cf, ngx_command_t *cmd, void *dummy)
             clcf->name.data = name->data + 2;
             clcf->noregex = 1;
 
+        // 使用'~'或'~*'
         } else if (name->data[0] == '~') {
 
             name->len--;
@@ -3619,6 +3810,7 @@ ngx_http_core_location(ngx_conf_t *cf, ngx_command_t *cmd, void *dummy)
 
         } else {
             // 没有标识符
+            // 默认是前缀匹配
 
             clcf->name = *name;
 
@@ -4059,6 +4251,8 @@ ngx_http_core_create_loc_conf(ngx_conf_t *cf)
      *     clcf->exact_match = 0;
      *     clcf->auto_redirect = 0;
      *     clcf->alias = 0;
+     *     clcf->limit_rate = NULL;
+     *     clcf->limit_rate_after = NULL;
      *     clcf->gzip_proxied = 0;
      *     clcf->keepalive_disable = 0;
      */
@@ -4067,6 +4261,7 @@ ngx_http_core_create_loc_conf(ngx_conf_t *cf)
     clcf->client_body_buffer_size = NGX_CONF_UNSET_SIZE;
     clcf->client_body_timeout = NGX_CONF_UNSET_MSEC;
     clcf->satisfy = NGX_CONF_UNSET_UINT;
+    clcf->auth_delay = NGX_CONF_UNSET_MSEC;
     clcf->if_modified_since = NGX_CONF_UNSET_UINT;
     clcf->max_ranges = NGX_CONF_UNSET_UINT;
     clcf->client_body_in_file_only = NGX_CONF_UNSET_UINT;
@@ -4089,8 +4284,6 @@ ngx_http_core_create_loc_conf(ngx_conf_t *cf)
     clcf->send_timeout = NGX_CONF_UNSET_MSEC;
     clcf->send_lowat = NGX_CONF_UNSET_SIZE;
     clcf->postpone_output = NGX_CONF_UNSET_SIZE;
-    clcf->limit_rate = NGX_CONF_UNSET_SIZE;
-    clcf->limit_rate_after = NGX_CONF_UNSET_SIZE;
     clcf->keepalive_timeout = NGX_CONF_UNSET_MSEC;
     clcf->keepalive_header = NGX_CONF_UNSET;
     clcf->keepalive_requests = NGX_CONF_UNSET_UINT;
@@ -4284,6 +4477,7 @@ ngx_http_core_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
                                |NGX_HTTP_KEEPALIVE_DISABLE_MSIE6));
     ngx_conf_merge_uint_value(conf->satisfy, prev->satisfy,
                               NGX_HTTP_SATISFY_ALL);
+    ngx_conf_merge_msec_value(conf->auth_delay, prev->auth_delay, 0);
     ngx_conf_merge_uint_value(conf->if_modified_since, prev->if_modified_since,
                               NGX_HTTP_IMS_EXACT);
     ngx_conf_merge_uint_value(conf->max_ranges, prev->max_ranges,
@@ -4319,9 +4513,15 @@ ngx_http_core_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
     ngx_conf_merge_size_value(conf->send_lowat, prev->send_lowat, 0);
     ngx_conf_merge_size_value(conf->postpone_output, prev->postpone_output,
                               1460);
-    ngx_conf_merge_size_value(conf->limit_rate, prev->limit_rate, 0);
-    ngx_conf_merge_size_value(conf->limit_rate_after, prev->limit_rate_after,
-                              0);
+
+    if (conf->limit_rate == NULL) {
+        conf->limit_rate = prev->limit_rate;
+    }
+
+    if (conf->limit_rate_after == NULL) {
+        conf->limit_rate_after = prev->limit_rate_after;
+    }
+
     ngx_conf_merge_msec_value(conf->keepalive_timeout,
                               prev->keepalive_timeout, 75000);
     ngx_conf_merge_sec_value(conf->keepalive_header,
@@ -4480,10 +4680,11 @@ ngx_http_core_listen(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     ngx_memzero(&lsopt, sizeof(ngx_http_listen_opt_t));
 
     // 拷贝ip地址
-    ngx_memcpy(&lsopt.sockaddr.sockaddr, &u.sockaddr, u.socklen);
+    //ngx_memcpy(&lsopt.sockaddr.sockaddr, &u.sockaddr, u.socklen);
 
     // 从ngx_url_t里拷贝信息
-    lsopt.socklen = u.socklen;
+    //lsopt.socklen = u.socklen;
+
     lsopt.backlog = NGX_LISTEN_BACKLOG;
     lsopt.rcvbuf = -1;
     lsopt.sndbuf = -1;
@@ -4493,14 +4694,13 @@ ngx_http_core_listen(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 #if (NGX_HAVE_TCP_FASTOPEN)
     lsopt.fastopen = -1;
 #endif
-    lsopt.wildcard = u.wildcard;
 #if (NGX_HAVE_INET6)
     lsopt.ipv6only = 1;
 #endif
 
     // 存储地址的字符串形式
-    (void) ngx_sock_ntop(&lsopt.sockaddr.sockaddr, lsopt.socklen, lsopt.addr,
-                         NGX_SOCKADDR_STRLEN, 1);
+    //(void) ngx_sock_ntop(&lsopt.sockaddr.sockaddr, lsopt.socklen, lsopt.addr,
+    //                     NGX_SOCKADDR_STRLEN, 1);
 
     // 检查其他参数，如bind/backlog/sndbuf/rcvbuf
     for (n = 2; n < cf->args->nelts; n++) {
@@ -4628,33 +4828,21 @@ ngx_http_core_listen(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 
         if (ngx_strncmp(value[n].data, "ipv6only=o", 10) == 0) {
 #if (NGX_HAVE_INET6 && defined IPV6_V6ONLY)
-            struct sockaddr  *sa;
+            if (ngx_strcmp(&value[n].data[10], "n") == 0) {
+                lsopt.ipv6only = 1;
 
-            sa = &lsopt.sockaddr.sockaddr;
-
-            if (sa->sa_family == AF_INET6) {
-
-                if (ngx_strcmp(&value[n].data[10], "n") == 0) {
-                    lsopt.ipv6only = 1;
-
-                } else if (ngx_strcmp(&value[n].data[10], "ff") == 0) {
-                    lsopt.ipv6only = 0;
-
-                } else {
-                    ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                                       "invalid ipv6only flags \"%s\"",
-                                       &value[n].data[9]);
-                    return NGX_CONF_ERROR;
-                }
-
-                lsopt.set = 1;
-                lsopt.bind = 1;
+            } else if (ngx_strcmp(&value[n].data[10], "ff") == 0) {
+                lsopt.ipv6only = 0;
 
             } else {
                 ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
-                                   "ipv6only is not supported "
-                                   "on addr \"%s\", ignored", lsopt.addr);
+                                   "invalid ipv6only flags \"%s\"",
+                                   &value[n].data[9]);
+                return NGX_CONF_ERROR;
             }
+
+            lsopt.set = 1;
+            lsopt.bind = 1;
 
             continue;
 #else
@@ -4812,11 +5000,23 @@ ngx_http_core_listen(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     }   //for检查参数结束
 
     // 加入cmcf->ports数组
-    if (ngx_http_add_listen(cf, cscf, &lsopt) == NGX_OK) {
-        return NGX_CONF_OK;
+    //if (ngx_http_add_listen(cf, cscf, &lsopt) == NGX_OK) {
+    //    return NGX_CONF_OK;
+    //}
+
+    // 1.15.10,range listen
+    for (n = 0; n < u.naddrs; n++) {
+        lsopt.sockaddr = u.addrs[n].sockaddr;
+        lsopt.socklen = u.addrs[n].socklen;
+        lsopt.addr_text = u.addrs[n].name;
+        lsopt.wildcard = ngx_inet_wildcard(lsopt.sockaddr);
+
+        if (ngx_http_add_listen(cf, cscf, &lsopt) != NGX_OK) {
+            return NGX_CONF_ERROR;
+        }
     }
 
-    return NGX_CONF_ERROR;
+    return NGX_CONF_OK;
 }
 
 
@@ -5427,6 +5627,7 @@ ngx_http_core_error_page(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
                 case NGX_HTTP_TO_HTTPS:
                 case NGX_HTTPS_CERT_ERROR:
                 case NGX_HTTPS_NO_CERT:
+                case NGX_HTTP_REQUEST_HEADER_TOO_LARGE:
                     err->overwrite = NGX_HTTP_BAD_REQUEST;
             }
         }

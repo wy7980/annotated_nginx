@@ -2,6 +2,9 @@
 //
 // 定义一些常用错误码的返回数据，html代码
 // 如果不需要显示页面可以做定制，减少网络传输消耗
+//
+// * ngx_http_send_special_response
+// * ngx_http_send_error_page
 
 /*
  * Copyright (C) Igor Sysoev
@@ -64,7 +67,7 @@ static u_char ngx_http_msie_refresh_tail[] =
 static char ngx_http_error_301_page[] =
 "<html>" CRLF
 "<head><title>301 Moved Permanently</title></head>" CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>301 Moved Permanently</h1></center>" CRLF
 ;
 
@@ -72,7 +75,7 @@ static char ngx_http_error_301_page[] =
 static char ngx_http_error_302_page[] =
 "<html>" CRLF
 "<head><title>302 Found</title></head>" CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>302 Found</h1></center>" CRLF
 ;
 
@@ -80,7 +83,7 @@ static char ngx_http_error_302_page[] =
 static char ngx_http_error_303_page[] =
 "<html>" CRLF
 "<head><title>303 See Other</title></head>" CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>303 See Other</h1></center>" CRLF
 ;
 
@@ -88,7 +91,7 @@ static char ngx_http_error_303_page[] =
 static char ngx_http_error_307_page[] =
 "<html>" CRLF
 "<head><title>307 Temporary Redirect</title></head>" CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>307 Temporary Redirect</h1></center>" CRLF
 ;
 
@@ -96,7 +99,7 @@ static char ngx_http_error_307_page[] =
 static char ngx_http_error_308_page[] =
 "<html>" CRLF
 "<head><title>308 Permanent Redirect</title></head>" CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>308 Permanent Redirect</h1></center>" CRLF
 ;
 
@@ -104,7 +107,7 @@ static char ngx_http_error_308_page[] =
 static char ngx_http_error_400_page[] =
 "<html>" CRLF
 "<head><title>400 Bad Request</title></head>" CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>400 Bad Request</h1></center>" CRLF
 ;
 
@@ -112,7 +115,7 @@ static char ngx_http_error_400_page[] =
 static char ngx_http_error_401_page[] =
 "<html>" CRLF
 "<head><title>401 Authorization Required</title></head>" CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>401 Authorization Required</h1></center>" CRLF
 ;
 
@@ -120,7 +123,7 @@ static char ngx_http_error_401_page[] =
 static char ngx_http_error_402_page[] =
 "<html>" CRLF
 "<head><title>402 Payment Required</title></head>" CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>402 Payment Required</h1></center>" CRLF
 ;
 
@@ -128,7 +131,7 @@ static char ngx_http_error_402_page[] =
 static char ngx_http_error_403_page[] =
 "<html>" CRLF
 "<head><title>403 Forbidden</title></head>" CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>403 Forbidden</h1></center>" CRLF
 ;
 
@@ -136,7 +139,7 @@ static char ngx_http_error_403_page[] =
 static char ngx_http_error_404_page[] =
 "<html>" CRLF
 "<head><title>404 Not Found</title></head>" CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>404 Not Found</h1></center>" CRLF
 ;
 
@@ -144,7 +147,7 @@ static char ngx_http_error_404_page[] =
 static char ngx_http_error_405_page[] =
 "<html>" CRLF
 "<head><title>405 Not Allowed</title></head>" CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>405 Not Allowed</h1></center>" CRLF
 ;
 
@@ -152,7 +155,7 @@ static char ngx_http_error_405_page[] =
 static char ngx_http_error_406_page[] =
 "<html>" CRLF
 "<head><title>406 Not Acceptable</title></head>" CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>406 Not Acceptable</h1></center>" CRLF
 ;
 
@@ -160,7 +163,7 @@ static char ngx_http_error_406_page[] =
 static char ngx_http_error_408_page[] =
 "<html>" CRLF
 "<head><title>408 Request Time-out</title></head>" CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>408 Request Time-out</h1></center>" CRLF
 ;
 
@@ -168,7 +171,7 @@ static char ngx_http_error_408_page[] =
 static char ngx_http_error_409_page[] =
 "<html>" CRLF
 "<head><title>409 Conflict</title></head>" CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>409 Conflict</h1></center>" CRLF
 ;
 
@@ -176,7 +179,7 @@ static char ngx_http_error_409_page[] =
 static char ngx_http_error_410_page[] =
 "<html>" CRLF
 "<head><title>410 Gone</title></head>" CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>410 Gone</h1></center>" CRLF
 ;
 
@@ -184,7 +187,7 @@ static char ngx_http_error_410_page[] =
 static char ngx_http_error_411_page[] =
 "<html>" CRLF
 "<head><title>411 Length Required</title></head>" CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>411 Length Required</h1></center>" CRLF
 ;
 
@@ -192,7 +195,7 @@ static char ngx_http_error_411_page[] =
 static char ngx_http_error_412_page[] =
 "<html>" CRLF
 "<head><title>412 Precondition Failed</title></head>" CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>412 Precondition Failed</h1></center>" CRLF
 ;
 
@@ -200,7 +203,7 @@ static char ngx_http_error_412_page[] =
 static char ngx_http_error_413_page[] =
 "<html>" CRLF
 "<head><title>413 Request Entity Too Large</title></head>" CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>413 Request Entity Too Large</h1></center>" CRLF
 ;
 
@@ -208,7 +211,7 @@ static char ngx_http_error_413_page[] =
 static char ngx_http_error_414_page[] =
 "<html>" CRLF
 "<head><title>414 Request-URI Too Large</title></head>" CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>414 Request-URI Too Large</h1></center>" CRLF
 ;
 
@@ -216,7 +219,7 @@ static char ngx_http_error_414_page[] =
 static char ngx_http_error_415_page[] =
 "<html>" CRLF
 "<head><title>415 Unsupported Media Type</title></head>" CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>415 Unsupported Media Type</h1></center>" CRLF
 ;
 
@@ -224,7 +227,7 @@ static char ngx_http_error_415_page[] =
 static char ngx_http_error_416_page[] =
 "<html>" CRLF
 "<head><title>416 Requested Range Not Satisfiable</title></head>" CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>416 Requested Range Not Satisfiable</h1></center>" CRLF
 ;
 
@@ -232,7 +235,7 @@ static char ngx_http_error_416_page[] =
 static char ngx_http_error_421_page[] =
 "<html>" CRLF
 "<head><title>421 Misdirected Request</title></head>" CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>421 Misdirected Request</h1></center>" CRLF
 ;
 
@@ -240,7 +243,7 @@ static char ngx_http_error_421_page[] =
 static char ngx_http_error_429_page[] =
 "<html>" CRLF
 "<head><title>429 Too Many Requests</title></head>" CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>429 Too Many Requests</h1></center>" CRLF
 ;
 
@@ -249,7 +252,7 @@ static char ngx_http_error_494_page[] =
 "<html>" CRLF
 "<head><title>400 Request Header Or Cookie Too Large</title></head>"
 CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>400 Bad Request</h1></center>" CRLF
 "<center>Request Header Or Cookie Too Large</center>" CRLF
 ;
@@ -259,7 +262,7 @@ static char ngx_http_error_495_page[] =
 "<html>" CRLF
 "<head><title>400 The SSL certificate error</title></head>"
 CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>400 Bad Request</h1></center>" CRLF
 "<center>The SSL certificate error</center>" CRLF
 ;
@@ -269,7 +272,7 @@ static char ngx_http_error_496_page[] =
 "<html>" CRLF
 "<head><title>400 No required SSL certificate was sent</title></head>"
 CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>400 Bad Request</h1></center>" CRLF
 "<center>No required SSL certificate was sent</center>" CRLF
 ;
@@ -279,7 +282,7 @@ static char ngx_http_error_497_page[] =
 "<html>" CRLF
 "<head><title>400 The plain HTTP request was sent to HTTPS port</title></head>"
 CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>400 Bad Request</h1></center>" CRLF
 "<center>The plain HTTP request was sent to HTTPS port</center>" CRLF
 ;
@@ -288,7 +291,7 @@ CRLF
 static char ngx_http_error_500_page[] =
 "<html>" CRLF
 "<head><title>500 Internal Server Error</title></head>" CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>500 Internal Server Error</h1></center>" CRLF
 ;
 
@@ -296,7 +299,7 @@ static char ngx_http_error_500_page[] =
 static char ngx_http_error_501_page[] =
 "<html>" CRLF
 "<head><title>501 Not Implemented</title></head>" CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>501 Not Implemented</h1></center>" CRLF
 ;
 
@@ -304,7 +307,7 @@ static char ngx_http_error_501_page[] =
 static char ngx_http_error_502_page[] =
 "<html>" CRLF
 "<head><title>502 Bad Gateway</title></head>" CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>502 Bad Gateway</h1></center>" CRLF
 ;
 
@@ -312,7 +315,7 @@ static char ngx_http_error_502_page[] =
 static char ngx_http_error_503_page[] =
 "<html>" CRLF
 "<head><title>503 Service Temporarily Unavailable</title></head>" CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>503 Service Temporarily Unavailable</h1></center>" CRLF
 ;
 
@@ -320,7 +323,7 @@ static char ngx_http_error_503_page[] =
 static char ngx_http_error_504_page[] =
 "<html>" CRLF
 "<head><title>504 Gateway Time-out</title></head>" CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>504 Gateway Time-out</h1></center>" CRLF
 ;
 
@@ -328,7 +331,7 @@ static char ngx_http_error_504_page[] =
 static char ngx_http_error_505_page[] =
 "<html>" CRLF
 "<head><title>505 HTTP Version Not Supported</title></head>" CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>505 HTTP Version Not Supported</h1></center>" CRLF
 ;
 
@@ -336,7 +339,7 @@ static char ngx_http_error_505_page[] =
 static char ngx_http_error_507_page[] =
 "<html>" CRLF
 "<head><title>507 Insufficient Storage</title></head>" CRLF
-"<body bgcolor=\"white\">" CRLF
+"<body>" CRLF
 "<center><h1>507 Insufficient Storage</h1></center>" CRLF
 ;
 
@@ -461,6 +464,7 @@ ngx_http_special_response_handler(ngx_http_request_t *r, ngx_int_t error)
 
     clcf = ngx_http_get_module_loc_conf(r, ngx_http_core_module);
 
+    // 没有指定错误页面
     if (!r->error_page && clcf->error_pages && r->uri_changes != 0) {
 
         if (clcf->recursive_error_pages == 0) {
@@ -476,6 +480,8 @@ ngx_http_special_response_handler(ngx_http_request_t *r, ngx_int_t error)
             }
         }
     }
+
+    // 指定了错误页面
 
     r->expect_tested = 1;
 
@@ -529,6 +535,7 @@ ngx_http_special_response_handler(ngx_http_request_t *r, ngx_int_t error)
         err = 0;
     }
 
+    // 在错误信息数组里查找err对应的错误页面发送
     return ngx_http_send_special_response(r, clcf, err);
 }
 
@@ -632,6 +639,12 @@ ngx_http_send_error_page(ngx_http_request_t *r, ngx_http_err_page_t *err_page)
         return ngx_http_named_location(r, &uri);
     }
 
+    r->expect_tested = 1;
+
+    if (ngx_http_discard_request_body(r) != NGX_OK) {
+        r->keepalive = 0;
+    }
+
     location = ngx_list_push(&r->headers_out.headers);
 
     if (location == NULL) {
@@ -667,6 +680,7 @@ ngx_http_send_error_page(ngx_http_request_t *r, ngx_http_err_page_t *err_page)
 }
 
 
+// 在错误信息数组里查找err对应的错误页面发送
 static ngx_int_t
 ngx_http_send_special_response(ngx_http_request_t *r,
     ngx_http_core_loc_conf_t *clcf, ngx_uint_t err)
@@ -678,6 +692,7 @@ ngx_http_send_special_response(ngx_http_request_t *r,
     ngx_uint_t    msie_padding;
     ngx_chain_t   out[3];
 
+    // 确定使用的页面title，不同的nginx版本字符串
     if (clcf->server_tokens == NGX_HTTP_SERVER_TOKENS_ON) {
         len = sizeof(ngx_http_error_full_tail) - 1;
         tail = ngx_http_error_full_tail;
@@ -693,6 +708,7 @@ ngx_http_send_special_response(ngx_http_request_t *r,
 
     msie_padding = 0;
 
+    // 在错误信息数组里查找err对应的错误页面
     if (ngx_http_error_pages[err].len) {
         r->headers_out.content_length_n = ngx_http_error_pages[err].len + len;
         if (clcf->msie_padding
@@ -710,6 +726,7 @@ ngx_http_send_special_response(ngx_http_request_t *r,
         r->headers_out.content_type_lowcase = NULL;
 
     } else {
+        // 没有错误页面那么就无内容
         r->headers_out.content_length_n = 0;
     }
 
@@ -718,32 +735,43 @@ ngx_http_send_special_response(ngx_http_request_t *r,
         r->headers_out.content_length = NULL;
     }
 
+    // 清除不必要的头
     ngx_http_clear_accept_ranges(r);
     ngx_http_clear_last_modified(r);
     ngx_http_clear_etag(r);
 
+    // 发送头
     rc = ngx_http_send_header(r);
 
     if (rc == NGX_ERROR || r->header_only) {
         return rc;
     }
 
+    // 没有错误页面那么就无内容
+    // 不发送body，结束
     if (ngx_http_error_pages[err].len == 0) {
         return ngx_http_send_special(r, NGX_HTTP_LAST);
     }
 
+    // 有错误页面，需要发送body
+
+    // 第一个buffer
     b = ngx_calloc_buf(r->pool);
     if (b == NULL) {
         return NGX_ERROR;
     }
 
+    // 填充buffer内容
     b->memory = 1;
     b->pos = ngx_http_error_pages[err].data;
     b->last = ngx_http_error_pages[err].data + ngx_http_error_pages[err].len;
 
+    // 第一个chain node完成，页面信息
     out[0].buf = b;
     out[0].next = &out[1];
 
+    // 第二个buffer
+    // 是nginx版本信息
     b = ngx_calloc_buf(r->pool);
     if (b == NULL) {
         return NGX_ERROR;
@@ -754,9 +782,12 @@ ngx_http_send_special_response(ngx_http_request_t *r,
     b->pos = tail;
     b->last = tail + len;
 
+    // 第二个chain node完成
+    // 默认是最后一个
     out[1].buf = b;
     out[1].next = NULL;
 
+    // msie特殊处理，多一个node
     if (msie_padding) {
         b = ngx_calloc_buf(r->pool);
         if (b == NULL) {
@@ -772,12 +803,14 @@ ngx_http_send_special_response(ngx_http_request_t *r,
         out[2].next = NULL;
     }
 
+    // 设置last标志
     if (r == r->main) {
         b->last_buf = 1;
     }
 
     b->last_in_chain = 1;
 
+    // 走过滤链发送给客户端
     return ngx_http_output_filter(r, &out[0]);
 }
 

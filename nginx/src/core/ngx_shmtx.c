@@ -1,4 +1,8 @@
 // annotated by chrono since 2018
+//
+// * ngx_shmtx_create
+// * ngx_shmtx_trylock
+// * ngx_shmtx_unlock
 
 /*
  * Copyright (C) Igor Sysoev
@@ -133,6 +137,8 @@ ngx_shmtx_lock(ngx_shmtx_t *mtx)
 
 #if (NGX_HAVE_POSIX_SEM)
 
+        // spin是-1则不使用信号量
+
         // 使用信号量则睡眠等待唤醒
         if (mtx->semaphore) {
             // wait++
@@ -174,6 +180,7 @@ ngx_shmtx_lock(ngx_shmtx_t *mtx)
 #endif
 
         // 使用信号量不会走这里
+        // spin是-1则不使用信号量
         // 占用cpu过久，让出cpu
         // 之后继续try_lock，直至lock成功
         ngx_sched_yield();

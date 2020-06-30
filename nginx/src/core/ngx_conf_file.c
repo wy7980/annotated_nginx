@@ -219,6 +219,7 @@ ngx_conf_parse(ngx_conf_t *cf, ngx_str_t *filename)
         // 设置当前解析的conf file
         cf->conf_file = &conf_file;
 
+        // 取文件相关的各种信息，例如大小
         if (ngx_fd_info(fd, &cf->conf_file->file.info) == NGX_FILE_ERROR) {
             ngx_log_error(NGX_LOG_EMERG, cf->log, ngx_errno,
                           ngx_fd_info_n " \"%s\" failed", filename->data);
@@ -346,7 +347,7 @@ ngx_conf_parse(ngx_conf_t *cf, ngx_str_t *filename)
                 goto failed;
             }
 
-            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, rv);
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "%s", rv);
 
             goto failed;
         }
@@ -734,12 +735,13 @@ ngx_conf_read_token(ngx_conf_t *cf)
         }
 
         if (last_space) {
-            if (ch == ' ' || ch == '\t' || ch == CR || ch == LF) {
-                continue;
-            }
 
             start = b->pos - 1;
             start_line = cf->conf_file->line;
+
+            if (ch == ' ' || ch == '\t' || ch == CR || ch == LF) {
+                continue;
+            }
 
             switch (ch) {
 
@@ -985,6 +987,8 @@ ngx_conf_full_name(ngx_cycle_t *cycle, ngx_str_t *name, ngx_uint_t conf_prefix)
 }
 
 
+// 加入到cycle->open_files链表里
+// 没有打开文件，之后在init_cycle里统一打开
 ngx_open_file_t *
 ngx_conf_open_file(ngx_cycle_t *cycle, ngx_str_t *name)
 {
@@ -1006,9 +1010,11 @@ ngx_conf_open_file(ngx_cycle_t *cycle, ngx_str_t *name)
             return NULL;
         }
 
+        // 遍历文件链表
         part = &cycle->open_files.part;
         file = part->elts;
 
+        // 查找是否已经打开过了
         for (i = 0; /* void */ ; i++) {
 
             if (i >= part->nelts) {
@@ -1024,21 +1030,27 @@ ngx_conf_open_file(ngx_cycle_t *cycle, ngx_str_t *name)
                 continue;
             }
 
+            // 如果名字相同，则已经打开过
+            // 返回之前创建的对象
             if (ngx_strcmp(full.data, file[i].name.data) == 0) {
                 return &file[i];
             }
         }
     }
 
+    // 文件链表遍历完毕，没有打开过
+
     file = ngx_list_push(&cycle->open_files);
     if (file == NULL) {
         return NULL;
     }
 
+    // 有文件名，暂时置为-1,拷贝文件名
     if (name->len) {
         file->fd = NGX_INVALID_FILE;
         file->name = full;
 
+    // 无文件名，使用标准错误流
     } else {
         file->fd = ngx_stderr;
         file->name = *name;

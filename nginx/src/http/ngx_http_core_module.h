@@ -80,10 +80,14 @@ typedef struct {
     // socket地址，使用union适应各种情形
     // 主要使用的是u.sockaddr
     // 1.11.x改为在ngx_inet.h里定义的ngx_sockaddr_t，简化了代码
-    ngx_sockaddr_t             sockaddr;
+    // 1.15.10后又改成了指针形式的数组
+    //ngx_sockaddr_t             sockaddr;
+
+    struct sockaddr           *sockaddr;
 
     // socket地址长度
     socklen_t                  socklen;
+    ngx_str_t                  addr_text;
 
     unsigned                   set:1;
     unsigned                   default_server:1;
@@ -126,8 +130,6 @@ typedef struct {
 #if (NGX_HAVE_DEFERRED_ACCEPT && defined SO_ACCEPTFILTER)
     char                      *accept_filter;
 #endif
-
-    u_char                     addr[NGX_SOCKADDR_STRLEN + 1];
 } ngx_http_listen_opt_t;
 
 
@@ -176,12 +178,15 @@ typedef enum {
     NGX_HTTP_LOG_PHASE
 } ngx_http_phases;
 
+// 存储handler/checker，里面用next实现阶段的快速跳转
 typedef struct ngx_http_phase_handler_s  ngx_http_phase_handler_t;
 
+// 阶段的checker函数
 typedef ngx_int_t (*ngx_http_phase_handler_pt)(ngx_http_request_t *r,
     ngx_http_phase_handler_t *ph);
 
 // 存储handler/checker，里面用next实现阶段的快速跳转
+// 是ngx_http_phase_engine_t.handlers里的元素
 struct ngx_http_phase_handler_s {
 
     // 阶段的checker函数
@@ -215,6 +220,7 @@ typedef struct {
 } ngx_http_phase_t;
 
 
+// ngx_http_core_main_conf_t
 // 重要结构体，存储server、监听端口、变量等信息
 typedef struct {
     // 存储http{}里定义的所有server，元素是ngx_http_core_srv_conf_t
@@ -225,6 +231,7 @@ typedef struct {
 
     ngx_hash_t                 headers_in_hash;
 
+    // 变量的散列表
     ngx_hash_t                 variables_hash;
 
     // 存储http里定义的所有变量
@@ -242,6 +249,8 @@ typedef struct {
     ngx_uint_t                 variables_hash_max_size;
     ngx_uint_t                 variables_hash_bucket_size;
 
+    // hash表初始化完毕，临时的variables_keys不再需要
+    // 置为空指针，最后在tmp_pool时释放
     ngx_hash_keys_arrays_t    *variables_keys;
 
     // http{}里定义的所有监听端口
@@ -257,6 +266,7 @@ typedef struct {
 } ngx_http_core_main_conf_t;
 
 
+// ngx_http_core_srv_conf_t
 typedef struct {
     // 在ngx_http_core_server_name()里存储ngx_http_server_name_t
     /* array of the ngx_http_server_name_t, "server_name" directive */
@@ -288,6 +298,7 @@ typedef struct {
     unsigned                    captures:1;
 #endif
 
+    // 本server内的location
     ngx_http_core_loc_conf_t  **named_locations;
 } ngx_http_core_srv_conf_t;
 
@@ -414,7 +425,11 @@ struct ngx_http_core_loc_conf_s {
     // named location，也就是@开头的location
     unsigned      named:1;
 
+    // location精确匹配配置文件里的uri
+    // 即使用'='前缀
     unsigned      exact_match:1;
+
+    // ^~ 不使用正则，前缀匹配
     unsigned      noregex:1;
 
     unsigned      auto_redirect:1;
@@ -471,11 +486,11 @@ struct ngx_http_core_loc_conf_s {
 
     // 限制速率
     // 用在ngx_http_write_filter_module.c
-    size_t        limit_rate;              /* limit_rate */
+    //size_t        limit_rate;              /* limit_rate */
 
     // 限制速率
     // 用在ngx_http_write_filter_module.c
-    size_t        limit_rate_after;        /* limit_rate_after */
+    //size_t        limit_rate_after;        /* limit_rate_after */
 
     // 发送数据的限制，默认是0，即不限制，尽量多发
     // 用在ngx_http_write_filter_module.c
@@ -485,6 +500,10 @@ struct ngx_http_core_loc_conf_s {
     size_t        subrequest_output_buffer_size;
                                            /* subrequest_output_buffer_size */
 
+    // 1.17.0 新变量
+    ngx_http_complex_value_t  *limit_rate; /* limit_rate */
+    ngx_http_complex_value_t  *limit_rate_after; /* limit_rate_after */
+
     // 超时相关的参数
     ngx_msec_t    client_body_timeout;     /* client_body_timeout */
     ngx_msec_t    send_timeout;            /* send_timeout */
@@ -492,6 +511,7 @@ struct ngx_http_core_loc_conf_s {
     ngx_msec_t    lingering_time;          /* lingering_time */
     ngx_msec_t    lingering_timeout;       /* lingering_timeout */
     ngx_msec_t    resolver_timeout;        /* resolver_timeout */
+    ngx_msec_t    auth_delay;              /* auth_delay */
 
     ngx_resolver_t  *resolver;             /* resolver */
 
@@ -604,6 +624,8 @@ struct ngx_http_location_tree_node_s {
 };
 
 
+// 启动引擎数组处理请求
+// 从phase_handler的位置开始调用模块处理
 void ngx_http_core_run_phases(ngx_http_request_t *r);
 
 // 各个阶段使用的checker

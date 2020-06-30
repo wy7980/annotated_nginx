@@ -1,4 +1,9 @@
 // annotated by chrono since 2016
+//
+// * ngx_http_get_module_ctx
+// * ngx_http_set_ctx
+// * ngx_http_top_header_filter
+// * ngx_http_top_body_filter
 
 /*
  * Copyright (C) Igor Sysoev
@@ -118,6 +123,10 @@ void ngx_http_close_connection(ngx_connection_t *c);
 #if (NGX_HTTP_SSL && defined SSL_CTRL_SET_TLSEXT_HOSTNAME)
 int ngx_http_ssl_servername(ngx_ssl_conn_t *ssl_conn, int *ad, void *arg);
 #endif
+#if (NGX_HTTP_SSL && defined SSL_R_CERT_CB_ERROR)
+int ngx_http_ssl_certificate(ngx_ssl_conn_t *ssl_conn, void *arg);
+#endif
+
 
 // 解析http请求行，即get xxx http/1.1 \r\n
 ngx_int_t ngx_http_parse_request_line(ngx_http_request_t *r, ngx_buf_t *b);

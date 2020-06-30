@@ -1,3 +1,5 @@
+// annotated by chrono since 2016
+//
 
 /*
  * Copyright (C) Igor Sysoev
@@ -13,9 +15,17 @@
 #include <ngx_core.h>
 
 
+// 管理文件
 struct ngx_file_s {
+    // 文件描述符
     ngx_fd_t                   fd;
+
+    // 文件名
     ngx_str_t                  name;
+
+    // 文件相关的信息
+    // typedef struct stat              ngx_file_info_t;
+    // 通常使用ngx_fd_info获取
     ngx_file_info_t            info;
 
     off_t                      offset;
@@ -23,6 +33,8 @@ struct ngx_file_s {
 
     ngx_log_t                 *log;
 
+    // 利用线程池无阻塞读取文件
+    // in os/unix/ngx_files.c
 #if (NGX_THREADS || NGX_COMPAT)
     ngx_int_t                (*thread_handler)(ngx_thread_task_t *task,
                                                ngx_file_t *file);

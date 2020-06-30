@@ -44,9 +44,6 @@ static ssize_t ngx_udp_shared_recv(ngx_connection_t *c, u_char *buf,
 // key是客户端地址+服务器地址
 static ngx_int_t ngx_insert_udp_connection(ngx_connection_t *c);
 
-// 清理函数，会删除红黑树节点
-static void ngx_delete_udp_connection(void *data);
-
 // 红黑树查找是否已经有连接
 // 使用crc32计算散列
 // key是客户端地址+服务器地址
@@ -328,6 +325,7 @@ ngx_event_recvmsg(ngx_event_t *ev)
 
             // udp连接可读
             rev->ready = 1;
+            rev->active = 0;
 
             // 执行读回调函数ngx_stream_session_handler
             // 按阶段执行处理引擎，调用各个模块的handler
@@ -336,10 +334,13 @@ ngx_event_recvmsg(ngx_event_t *ev)
             rev->handler(rev);
 
             // 读完清空缓冲区
-            c->udp->buffer = NULL;
+            if (c->udp) {
+                c->udp->buffer = NULL;
+            }
 
             // 此时不可读
             rev->ready = 0;
+            rev->active = 1;
 
             // 完成一次udp accept，continue
             // 实际上是一次udp read
@@ -445,6 +446,7 @@ ngx_event_recvmsg(ngx_event_t *ev)
         wev = c->write;
 
         // 连接立即可写
+        rev->active = 1;
         wev->ready = 1;
 
         rev->log = log;
@@ -575,7 +577,9 @@ ngx_udp_shared_recv(ngx_connection_t *c, u_char *buf, size_t size)
 
     // 清空缓冲区
     c->udp->buffer = NULL;
+
     c->read->ready = 0;
+    c->read->active = 1;
 
     return n;
 }
@@ -692,12 +696,18 @@ ngx_insert_udp_connection(ngx_connection_t *c)
 
 
 // 清理函数，会删除红黑树节点
-static void
+void
 ngx_delete_udp_connection(void *data)
 {
     ngx_connection_t  *c = data;
 
+    if (c->udp == NULL) {
+        return;
+    }
+
     ngx_rbtree_delete(&c->listening->rbtree, &c->udp->node);
+
+    c->udp = NULL;
 }
 
 
@@ -786,6 +796,14 @@ ngx_lookup_udp_connection(ngx_listening_t *ls, struct sockaddr *sockaddr,
     }
 
     return NULL;
+}
+
+#else
+
+void
+ngx_delete_udp_connection(void *data)
+{
+    return;
 }
 
 #endif

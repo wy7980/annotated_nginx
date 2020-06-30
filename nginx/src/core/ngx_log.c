@@ -36,10 +36,16 @@ static void ngx_log_memory_writer(ngx_log_t *log, ngx_uint_t level,
 static void ngx_log_memory_cleanup(void *data);
 
 
+// 写内存日志用的管理对象
 typedef struct {
+    // 内存空间的开始结束位置
     u_char        *start;
     u_char        *end;
+
+    // 当前位置
     u_char        *pos;
+
+    // 原子操作，写入的数量
     ngx_atomic_t   written;
 } ngx_log_memory_buf_t;
 
@@ -93,6 +99,10 @@ static ngx_log_t        ngx_log;
 // 仅在配置阶段使用
 static ngx_open_file_t  ngx_log_file;
 
+// 日志输出到标准错误流
+// #define ngx_stderr               STDERR_FILENO
+// 默认不使用标准流记录日志
+// 在nginx.c里置0
 ngx_uint_t              ngx_use_stderr = 1;
 
 
@@ -135,6 +145,7 @@ ngx_log_error_core(ngx_uint_t level, ngx_log_t *log, ngx_err_t err,
 
 #else
 
+// 此函数原型通常可以忽略，原因见上
 void
 ngx_log_error_core(ngx_uint_t level, ngx_log_t *log, ngx_err_t err,
     const char *fmt, va_list args)
@@ -212,6 +223,7 @@ ngx_log_error_core(ngx_uint_t level, ngx_log_t *log, ngx_err_t err,
     // 加上一个换行符
     ngx_linefeed(p);
 
+    // 默认不输出到标准流
     wrote_stderr = 0;
 
     // 是否要针对某些连接打印调试日志
@@ -230,6 +242,7 @@ ngx_log_error_core(ngx_uint_t level, ngx_log_t *log, ngx_err_t err,
 
         // log对象有专用的写函数指针，例如syslog
         // 那么就不写文件，调用函数写日志
+        // 可以定制writer函数，实现特殊的写日志行为，如rotate
         if (log->writer) {
             log->writer(log, level, errstr, p - errstr);
             goto next;
@@ -259,6 +272,8 @@ ngx_log_error_core(ngx_uint_t level, ngx_log_t *log, ngx_err_t err,
             log->disk_full_time = ngx_time();
         }
 
+        // 检查文件描述符，是标准流
+        // 则置标志位
         if (log->file->fd == ngx_stderr) {
             wrote_stderr = 1;
         }
@@ -269,6 +284,8 @@ ngx_log_error_core(ngx_uint_t level, ngx_log_t *log, ngx_err_t err,
         log = log->next;
     }
 
+    // 默认不使用标准流记录日志
+    // 在nginx.c里置0
     if (!ngx_use_stderr
         || level > NGX_LOG_WARN
         || wrote_stderr)
@@ -276,10 +293,14 @@ ngx_log_error_core(ngx_uint_t level, ngx_log_t *log, ngx_err_t err,
         return;
     }
 
+    // 前面输出的是基本的信息：当前时间+[错误级别]+pid#tid:
+    // 调整字符串指针
     msg -= (7 + err_levels[level].len + 3);
 
+    // 重新打印日志级别
     (void) ngx_sprintf(msg, "nginx: [%V] ", &err_levels[level]);
 
+    // 输出到标准流
     (void) ngx_write_console(ngx_stderr, msg, p - msg);
 }
 
@@ -665,6 +686,8 @@ ngx_log_set_levels(ngx_conf_t *cf, ngx_log_t *log)
     }
 
     // 如果只是设置了debug级别，那么就打印所有的子系统
+    // LOG_DEBUG=DEBUG_ALL=0x7ffffff0
+    // 所以在调用log_debug时位操作总成功
     if (log->log_level == NGX_LOG_DEBUG) {
         log->log_level = NGX_LOG_DEBUG_ALL;
     }
@@ -734,6 +757,7 @@ ngx_log_set_log(ngx_conf_t *cf, ngx_log_t **head)
         value[1].len -= 7;
         value[1].data += 7;
 
+        // 计算需要的内存大小
         needed = sizeof("MEMLOG  :" NGX_LINEFEED)
                  + cf->conf_file->file.name.len
                  + NGX_SIZE_T_LEN
@@ -748,11 +772,13 @@ ngx_log_set_log(ngx_conf_t *cf, ngx_log_t **head)
             return NGX_CONF_ERROR;
         }
 
+        // 内存管理对象
         buf = ngx_pcalloc(cf->pool, sizeof(ngx_log_memory_buf_t));
         if (buf == NULL) {
             return NGX_CONF_ERROR;
         }
 
+        // 分配内存
         buf->start = ngx_pnalloc(cf->pool, size);
         if (buf->start == NULL) {
             return NGX_CONF_ERROR;
@@ -760,12 +786,15 @@ ngx_log_set_log(ngx_conf_t *cf, ngx_log_t **head)
 
         buf->end = buf->start + size;
 
+        // 打印开头的字符串
         buf->pos = ngx_slprintf(buf->start, buf->end, "MEMLOG %uz %V:%ui%N",
                                 size, &cf->conf_file->file.name,
                                 cf->conf_file->line);
 
+        // 后续全是空格，不是0
         ngx_memset(buf->pos, ' ', buf->end - buf->pos);
 
+        // 清理函数
         cln = ngx_pool_cleanup_add(cf->pool, 0);
         if (cln == NULL) {
             return NGX_CONF_ERROR;
@@ -774,6 +803,7 @@ ngx_log_set_log(ngx_conf_t *cf, ngx_log_t **head)
         cln->data = new_log;
         cln->handler = ngx_log_memory_cleanup;
 
+        // 专门的内存写入函数
         new_log->writer = ngx_log_memory_writer;
         new_log->wdata = buf;
 
@@ -799,6 +829,8 @@ ngx_log_set_log(ngx_conf_t *cf, ngx_log_t **head)
 
     // 写入到文件
     } else {
+        // 加入到cycle->open_files链表里
+        // 没有打开文件，之后在init_cycle里统一打开
         new_log->file = ngx_conf_open_file(cf->cycle, &value[1]);
         if (new_log->file == NULL) {
             return NGX_CONF_ERROR;
@@ -881,8 +913,10 @@ ngx_log_memory_writer(ngx_log_t *log, ngx_uint_t level, u_char *buf,
         return;
     }
 
+    // 原子增加写入数量
     written = ngx_atomic_fetch_add(&mem->written, len);
 
+    // 写入的末尾位置
     p = mem->pos + written % (mem->end - mem->pos);
 
     avail = mem->end - p;

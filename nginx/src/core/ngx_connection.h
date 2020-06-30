@@ -264,8 +264,7 @@ struct ngx_connection_s {
     // 客户端的sockaddr，文本形式
     ngx_str_t           addr_text;
 
-    ngx_str_t           proxy_protocol_addr;
-    in_port_t           proxy_protocol_port;
+    ngx_proxy_protocol_t  *proxy_protocol;
 
     // 给https协议用的成员
     // 定义在event/ngx_event_openssl.h
@@ -381,6 +380,8 @@ ngx_listening_t *ngx_create_listening(ngx_conf_t *cf, struct sockaddr *sockaddr,
 // 1.15.2 change signature
 ngx_int_t ngx_clone_listening(ngx_cycle_t *cycle, ngx_listening_t *ls);
 
+// 根据传递过来的socket描述符，使用系统调用获取之前设置的参数
+// 填入ngx_listeing_t结构体
 ngx_int_t ngx_set_inherited_sockets(ngx_cycle_t *cycle);
 
 // ngx_cycle.c : init_cycle()里被调用

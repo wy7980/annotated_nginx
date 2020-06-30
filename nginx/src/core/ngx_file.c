@@ -1,3 +1,6 @@
+// annotated by chrono since 2016
+//
+// * ngx_create_full_path
 
 /*
  * Copyright (C) Igor Sysoev
@@ -300,6 +303,7 @@ ngx_create_path(ngx_file_t *file, ngx_path_t *path)
 }
 
 
+// 从根目录开始创建目录
 ngx_err_t
 ngx_create_full_path(u_char *dir, ngx_uint_t access)
 {
@@ -314,6 +318,7 @@ ngx_create_full_path(u_char *dir, ngx_uint_t access)
     p = dir + 1;
 #endif
 
+    // 使用'/'查找目录字符串
     for ( /* void */ ; *p; p++) {
         ch = *p;
 
@@ -321,8 +326,11 @@ ngx_create_full_path(u_char *dir, ngx_uint_t access)
             continue;
         }
 
+        // 找到目录名，末尾置0
+
         *p = '\0';
 
+        // 调用系统函数创建目录
         if (ngx_create_dir(dir, access) == NGX_FILE_ERROR) {
             err = ngx_errno;
 
@@ -337,6 +345,7 @@ ngx_create_full_path(u_char *dir, ngx_uint_t access)
             }
         }
 
+        // 恢复字符串里的'/'
         *p = '/';
     }
 
@@ -796,10 +805,12 @@ ngx_copy_file(u_char *from, u_char *to, ngx_copy_file_t *cf)
 {
     char             *buf;
     off_t             size;
+    time_t            time;
     size_t            len;
     ssize_t           n;
     ngx_fd_t          fd, nfd;
     ngx_int_t         rc;
+    ngx_uint_t        access;
     ngx_file_info_t   fi;
 
     rc = NGX_ERROR;
@@ -814,8 +825,10 @@ ngx_copy_file(u_char *from, u_char *to, ngx_copy_file_t *cf)
         goto failed;
     }
 
-    if (cf->size != -1) {
+    if (cf->size != -1 && cf->access != 0 && cf->time != -1) {
         size = cf->size;
+        access = cf->access;
+        time = cf->time;
 
     } else {
         if (ngx_fd_info(fd, &fi) == NGX_FILE_ERROR) {
@@ -825,7 +838,9 @@ ngx_copy_file(u_char *from, u_char *to, ngx_copy_file_t *cf)
             goto failed;
         }
 
-        size = ngx_file_size(&fi);
+        size = (cf->size != -1) ? cf->size : ngx_file_size(&fi);
+        access = cf->access ? cf->access : ngx_file_access(&fi);
+        time = (cf->time != -1) ? cf->time : ngx_file_mtime(&fi);
     }
 
     len = cf->buf_size ? cf->buf_size : 65536;
@@ -839,8 +854,7 @@ ngx_copy_file(u_char *from, u_char *to, ngx_copy_file_t *cf)
         goto failed;
     }
 
-    nfd = ngx_open_file(to, NGX_FILE_WRONLY, NGX_FILE_CREATE_OR_OPEN,
-                        cf->access);
+    nfd = ngx_open_file(to, NGX_FILE_WRONLY, NGX_FILE_TRUNCATE, access);
 
     if (nfd == NGX_INVALID_FILE) {
         ngx_log_error(NGX_LOG_CRIT, cf->log, ngx_errno,
@@ -887,12 +901,10 @@ ngx_copy_file(u_char *from, u_char *to, ngx_copy_file_t *cf)
         size -= n;
     }
 
-    if (cf->time != -1) {
-        if (ngx_set_file_time(to, nfd, cf->time) != NGX_OK) {
-            ngx_log_error(NGX_LOG_ALERT, cf->log, ngx_errno,
-                          ngx_set_file_time_n " \"%s\" failed", to);
-            goto failed;
-        }
+    if (ngx_set_file_time(to, nfd, time) != NGX_OK) {
+        ngx_log_error(NGX_LOG_ALERT, cf->log, ngx_errno,
+                      ngx_set_file_time_n " \"%s\" failed", to);
+        goto failed;
     }
 
     rc = NGX_OK;
@@ -1014,13 +1026,13 @@ ngx_walk_tree(ngx_tree_ctx_t *ctx, ngx_str_t *tree)
 
         file.len = tree->len + 1 + len;
 
-        if (file.len + NGX_DIR_MASK_LEN > buf.len) {
+        if (file.len > buf.len) {
 
             if (buf.len) {
                 ngx_free(buf.data);
             }
 
-            buf.len = tree->len + 1 + len + NGX_DIR_MASK_LEN;
+            buf.len = tree->len + 1 + len;
 
             buf.data = ngx_alloc(buf.len + 1, ctx->log);
             if (buf.data == NULL) {

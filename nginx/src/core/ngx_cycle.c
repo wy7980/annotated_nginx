@@ -64,7 +64,10 @@ static ngx_connection_t  dumb;
 // 在main里调用,太长，以后可能会简化
 // 从old_cycle(init_cycle)里复制必要的信息，创建新cycle
 // 当reconfigure的时候old_cycle就是当前的cycle
-// 初始化core模块
+// 调用所有模块的init_module函数指针，初始化模块
+// 注意是在所有模块完成配置post configuration之后
+// 在打开日志、共享内存、端口之后才初始化模块
+// 此时还没有创建连接池（在init process里）
 ngx_cycle_t *
 ngx_init_cycle(ngx_cycle_t *old_cycle)
 {
@@ -350,6 +353,7 @@ ngx_init_cycle(ngx_cycle_t *old_cycle)
     }
 
     // 递归执行解析动作，各个模块允许的指令配置参数
+    // 里面有http的post configration指针
     // 再解析配置文件
     if (ngx_conf_parse(&conf, &cycle->conf_file) != NGX_CONF_OK) {
         environ = senv;
@@ -445,6 +449,7 @@ ngx_init_cycle(ngx_cycle_t *old_cycle)
 
     /* open the new files */
 
+    // 遍历文件列表，日志文件
     part = &cycle->open_files.part;
     file = part->elts;
 
@@ -464,6 +469,8 @@ ngx_init_cycle(ngx_cycle_t *old_cycle)
         }
 
         // 因为使用了APPEND，所以多进程写文件是安全的
+        // 没有调用ngx_conf_open_file
+        // 是真正的打开文件，返回文件描述符
         file[i].fd = ngx_open_file(file[i].name.data,
                                    NGX_FILE_APPEND,
                                    NGX_FILE_CREATE_OR_OPEN,
@@ -480,6 +487,7 @@ ngx_init_cycle(ngx_cycle_t *old_cycle)
             goto failed;
         }
 
+        // unix里设置close on exec，fork后自动关闭描述符
 #if !(NGX_WIN32)
         if (fcntl(file[i].fd, F_SETFD, FD_CLOEXEC) == -1) {
             ngx_log_error(NGX_LOG_EMERG, log, ngx_errno,
@@ -762,7 +770,7 @@ ngx_init_cycle(ngx_cycle_t *old_cycle)
 
     // 调用所有模块的init_module函数指针，初始化模块
     // 注意是在所有模块完成配置post configuration之后
-    // 在打开端口之后才初始化模块
+    // 在打开日志、共享内存、端口之后才初始化模块
     // 此时还没有创建连接池（在init process里）
     if (ngx_init_modules(cycle) != NGX_OK) {
         /* fatal */
@@ -998,6 +1006,69 @@ failed:
         }
     }
 
+    /* free the newly created shared memory */
+
+    part = &cycle->shared_memory.part;
+    shm_zone = part->elts;
+
+    for (i = 0; /* void */ ; i++) {
+
+        if (i >= part->nelts) {
+            if (part->next == NULL) {
+                break;
+            }
+            part = part->next;
+            shm_zone = part->elts;
+            i = 0;
+        }
+
+        if (shm_zone[i].shm.addr == NULL) {
+            continue;
+        }
+
+        opart = &old_cycle->shared_memory.part;
+        oshm_zone = opart->elts;
+
+        for (n = 0; /* void */ ; n++) {
+
+            if (n >= opart->nelts) {
+                if (opart->next == NULL) {
+                    break;
+                }
+                opart = opart->next;
+                oshm_zone = opart->elts;
+                n = 0;
+            }
+
+            if (shm_zone[i].shm.name.len != oshm_zone[n].shm.name.len) {
+                continue;
+            }
+
+            if (ngx_strncmp(shm_zone[i].shm.name.data,
+                            oshm_zone[n].shm.name.data,
+                            shm_zone[i].shm.name.len)
+                != 0)
+            {
+                continue;
+            }
+
+            if (shm_zone[i].tag == oshm_zone[n].tag
+                && shm_zone[i].shm.size == oshm_zone[n].shm.size
+                && !shm_zone[i].noreuse)
+            {
+                goto old_shm_zone_found;
+            }
+
+            break;
+        }
+
+        ngx_shm_free(&shm_zone[i].shm);
+
+    old_shm_zone_found:
+
+        continue;
+    }
+
     if (ngx_test_config) {
         ngx_destroy_cycle_pools(&conf);
         return NULL;
@@ -1044,6 +1115,7 @@ ngx_init_zone_pool(ngx_cycle_t *cycle, ngx_shm_zone_t *zn)
     sp = (ngx_slab_pool_t *) zn->shm.addr;
 
     // 已存在就复用
+    // 依据nginx官方文档，shm.exists字段仅用于windows
     if (zn->shm.exists) {
 
         if (sp == sp->addr) {
@@ -1092,7 +1164,8 @@ ngx_init_zone_pool(ngx_cycle_t *cycle, ngx_shm_zone_t *zn)
 
 #else
 
-    file = ngx_pnalloc(cycle->pool, cycle->lock_file.len + zn->shm.name.len);
+    file = ngx_pnalloc(cycle->pool,
+                       cycle->lock_file.len + zn->shm.name.len + 1);
     if (file == NULL) {
         return NGX_ERROR;
     }
@@ -1271,7 +1344,7 @@ ngx_test_lockfile(u_char *file, ngx_log_t *log)
 
 
 // 重新打开所有文件, logrotate
-// 收到hup信号时被调用
+// 收到sigusr1信号时被调用
 void
 ngx_reopen_files(ngx_cycle_t *cycle, ngx_uid_t user)
 {
@@ -1281,6 +1354,7 @@ ngx_reopen_files(ngx_cycle_t *cycle, ngx_uid_t user)
     ngx_open_file_t  *file;
 
     // 遍历文件链表
+    // 里面存放的是日志文件
     part = &cycle->open_files.part;
     file = part->elts;
 
@@ -1480,6 +1554,9 @@ ngx_shared_memory_add(ngx_conf_t *cf, ngx_str_t *name, size_t size, void *tag)
     shm_zone->data = NULL;
 
     shm_zone->shm.log = cf->cycle->log;
+
+    // 1.15.7新增此行
+    shm_zone->shm.addr = NULL;
 
     // 共享内存的大小
     shm_zone->shm.size = size;

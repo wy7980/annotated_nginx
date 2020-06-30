@@ -1,4 +1,7 @@
 // annotated by chrono since 2016
+//
+// * ngx_hash_elt_t
+// * ngx_hash_init_t
 
 /*
  * Copyright (C) Igor Sysoev
@@ -14,25 +17,33 @@
 #include <ngx_core.h>
 
 
-// 散列的桶
+// 散列的桶，不定长结构体
+// 末尾的1长度数组是C语言常用的技巧
 typedef struct {
     // 指向实际的元素
     void             *value;
 
     // name的实际长度
+    // name即散列表元素的key
     u_short           len;
 
+    // 存储key
+    // 在分配内存时会分配适当的大小
     u_char            name[1];
 } ngx_hash_elt_t;
 
 
 // 散列表结构体
+// 表面上好像是使用开放寻址法
+// 但实际上是开链法，只是链表表现为紧凑的数组
+// 用链表存储key相同的元素
 typedef struct {
     // 散列桶存储位置
     // 二维数组，里面存储的是指针
     ngx_hash_elt_t  **buckets;
 
     // 数组的长度
+    // 即桶的数量
     ngx_uint_t        size;
 } ngx_hash_t;
 
@@ -47,6 +58,7 @@ typedef struct {
 
 
 // 初始化散列表的数组元素
+// 存放的是key、对应的hash和值
 typedef struct {
     ngx_str_t         key;
     ngx_uint_t        key_hash;
@@ -80,6 +92,7 @@ typedef struct {
     ngx_hash_t       *hash;
 
     // 散列函数
+    // 通常是ngx_hash_key_lc
     ngx_hash_key_pt   key;
 
     // 散列表里的最大桶数量
@@ -88,7 +101,7 @@ typedef struct {
     // 桶的大小，即ngx_hash_elt_t加自定义数据
     ngx_uint_t        bucket_size;
 
-    // 散列表的名字
+    // 散列表的名字，记录日志用
     char             *name;
 
     // 使用的内存池
@@ -135,7 +148,11 @@ typedef struct {
 } ngx_table_elt_t;
 
 
+// 表面上好像是使用开放寻址法
+// 但实际上是开链法，只是链表表现为紧凑的数组
+// 用链表存储key相同的元素
 void *ngx_hash_find(ngx_hash_t *hash, ngx_uint_t key, u_char *name, size_t len);
+
 void *ngx_hash_find_wc_head(ngx_hash_wildcard_t *hwc, u_char *name, size_t len);
 void *ngx_hash_find_wc_tail(ngx_hash_wildcard_t *hwc, u_char *name, size_t len);
 void *ngx_hash_find_combined(ngx_hash_combined_t *hash, ngx_uint_t key,
@@ -147,6 +164,8 @@ ngx_int_t ngx_hash_init(ngx_hash_init_t *hinit, ngx_hash_key_t *names,
     ngx_uint_t nelts);
 
 // 初始化通配符散列表hinit
+// 函数执行后把names数组里的元素放入散列表，可以hash查找
+// Nginx散列表是只读的，初始化后不能修改，只能查找
 ngx_int_t ngx_hash_wildcard_init(ngx_hash_init_t *hinit, ngx_hash_key_t *names,
     ngx_uint_t nelts);
 

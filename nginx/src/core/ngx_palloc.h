@@ -1,4 +1,7 @@
 // annotated by chrono since 2016
+//
+// * ngx_pool_data_t
+// * ngx_pool_s
 
 /*
  * Copyright (C) Igor Sysoev
@@ -13,6 +16,9 @@
 #include <ngx_config.h>
 #include <ngx_core.h>
 
+// 如果编译时指定宏NGX_DEBUG_PALLOC
+// 则不会启用内存池机制，都使用malloc分配内存
+// 方便使用valgrind等来检测内存问题
 
 /*
  * NGX_MAX_ALLOC_FROM_POOL should be (ngx_pagesize - 1), i.e. 4095 on x86.
@@ -40,6 +46,7 @@
 
 
 // 内存池销毁时调用的清理函数
+// 相当于析构函数，必要的清理动作
 typedef void (*ngx_pool_cleanup_pt)(void *data);
 
 typedef struct ngx_pool_cleanup_s  ngx_pool_cleanup_t;
@@ -73,10 +80,12 @@ struct ngx_pool_large_s {
 // 64位系统大小为32字节
 typedef struct {
     // 可用内存的起始位置
+    // last的意思是分配内存后的最后位置
     // 小块内存每次都从这里分配
     u_char               *last;
 
     // 可用内存的结束位置
+    // 即此内存块的末地址
     u_char               *end;
 
     // 下一个内存池节点
@@ -94,9 +103,13 @@ typedef struct {
 // 每个节点分配小块内存
 // 但max、current、大块内存链表只在头节点
 // 64位系统大小为80字节
+// 结构体里没有保存块大小的字段，由d.end-p得到
 struct ngx_pool_s {
     // 描述本内存池节点的信息
     ngx_pool_data_t       d;
+
+    // 下面的字段仅在第一个块中有意义
+    // 其他块中不存在，被用于分配内存
 
     // 可分配的最大块
     // 不能超过NGX_MAX_ALLOC_FROM_POOL,即4k-1
@@ -135,9 +148,16 @@ typedef struct {
 ngx_pool_t *ngx_create_pool(size_t size, ngx_log_t *log);
 
 // 销毁内存池
+// 调用清理函数链表
+// 检查大块内存链表，直接free
+// 遍历内存池节点，逐个free
 void ngx_destroy_pool(ngx_pool_t *pool);
 
-// 重置内存池，释放内存
+// 重置内存池，释放内存，但没有free归还给系统
+// 之前已经分配的内存块仍然保留
+// 遍历内存池节点，逐个重置空闲指针位置
+// 注意cleanup链表没有清空
+// 只有destroy时才会销毁
 void ngx_reset_pool(ngx_pool_t *pool);
 
 // 分配8字节对齐的内存，速度快，可能有少量浪费

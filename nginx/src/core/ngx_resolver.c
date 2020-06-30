@@ -972,7 +972,8 @@ ngx_resolve_addr(ngx_resolver_ctx_t *ctx)
 
             name = ngx_resolver_dup(r, rn->name, rn->nlen);
             if (name == NULL) {
-                goto failed;
+                ngx_resolver_free(r, ctx);
+                return NGX_ERROR;
             }
 
             ctx->name.len = rn->nlen;
@@ -4266,7 +4267,15 @@ ngx_resolver_report_srv(ngx_resolver_t *r, ngx_resolver_ctx_t *ctx)
     }
 
     if (naddrs == 0) {
-        ctx->state = NGX_RESOLVE_NXDOMAIN;
+        ctx->state = srvs[0].state;
+
+        for (i = 0; i < nsrvs; i++) {
+            if (srvs[i].state == NGX_RESOLVE_NXDOMAIN) {
+                ctx->state = NGX_RESOLVE_NXDOMAIN;
+                break;
+            }
+        }
+
         ctx->valid = ngx_time() + (r->valid ? r->valid : 10);
 
         ctx->handler(ctx);

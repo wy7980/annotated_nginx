@@ -6,6 +6,7 @@
 // * ngx_get_connection
 // * ngx_close_connection
 // * ngx_close_listening_sockets
+// * ngx_connection_local_sockaddr
 //
 // 1.10增加对reuseport的支持
 
@@ -109,6 +110,9 @@ ngx_create_listening(ngx_conf_t *cf, struct sockaddr *sockaddr,
     // 拷贝addr的字符串形式
     ngx_memcpy(ls->addr_text.data, text, len);
 
+    // 1.15.0 新增，管理本端口的udp客户端连接
+    // 保持udp连接，支持客户端发多包
+    // 但对于tcp连接来说浪费了点空间
 #if !(NGX_WIN32)
     ngx_rbtree_init(&ls->rbtree, &ls->sentinel, ngx_udp_rbtree_insert_value);
 #endif
@@ -353,6 +357,7 @@ ngx_set_inherited_sockets(ngx_cycle_t *cycle)
         reuseport = 0;
         olen = sizeof(int);
 
+        // SO_REUSEPORT_LB目前仅在FreeBSD里有效
 #ifdef SO_REUSEPORT_LB
 
         if (getsockopt(ls[i].fd, SOL_SOCKET, SO_REUSEPORT_LB,
@@ -531,6 +536,7 @@ ngx_open_listening_sockets(ngx_cycle_t *cycle)
 
                 int  reuseport = 1;
 
+            // SO_REUSEPORT_LB目前仅在FreeBSD里有效
 #ifdef SO_REUSEPORT_LB
 
                 if (setsockopt(ls[i].fd, SOL_SOCKET, SO_REUSEPORT_LB,
@@ -613,6 +619,7 @@ ngx_open_listening_sockets(ngx_cycle_t *cycle)
 
                 reuseport = 1;
 
+                // SO_REUSEPORT_LB目前仅在FreeBSD里有效
 #ifdef SO_REUSEPORT_LB
 
                 if (setsockopt(s, SOL_SOCKET, SO_REUSEPORT_LB,
@@ -1132,6 +1139,7 @@ ngx_configure_listening_sockets(ngx_cycle_t *cycle)
 #endif
     }
 
+    // 此句貌似多余，应该删除？
     return;
 }
 
@@ -1191,12 +1199,15 @@ ngx_close_listening_sockets(ngx_cycle_t *cycle)
 
 #if (NGX_HAVE_UNIX_DOMAIN)
 
+        // 对于domain socket需要删除文件
         if (ls[i].sockaddr->sa_family == AF_UNIX
             && ngx_process <= NGX_PROCESS_MASTER
             && ngx_new_binary == 0)
         {
+            // 去掉前面的unix:前缀
             u_char *name = ls[i].addr_text.data + sizeof("unix:") - 1;
 
+            // 删除文件
             if (ngx_delete_file(name) == NGX_FILE_ERROR) {
                 ngx_log_error(NGX_LOG_EMERG, cycle->log, ngx_socket_errno,
                               ngx_delete_file_n " %s failed", name);
@@ -1223,6 +1234,7 @@ ngx_get_connection(ngx_socket_t s, ngx_log_t *log)
 
     /* disable warning: Win32 SOCKET is u_int while UNIX socket is int */
 
+    // 如果使用epoll，那么files指针通常是null，即不会使用
     if (ngx_cycle->files && (ngx_uint_t) s >= ngx_cycle->files_n) {
         ngx_log_error(NGX_LOG_ALERT, log, 0,
                       "the new socket has number %d, "
@@ -1232,6 +1244,7 @@ ngx_get_connection(ngx_socket_t s, ngx_log_t *log)
     }
 
     // 从全局变量ngx_cycle里获取空闲链接，即free_connections链表
+    // free_connections是空闲链表头指针
     c = ngx_cycle->free_connections;
 
     if (c == NULL) {
@@ -1259,11 +1272,13 @@ ngx_get_connection(ngx_socket_t s, ngx_log_t *log)
     // 此时已经拿到了空闲连接
 
     // 调整空闲链表的指针，复用data成员
+    // 空闲链表头指针指向链表里的下一个节点
     ngx_cycle->free_connections = c->data;
 
     // 空闲连接计数器减少
     ngx_cycle->free_connection_n--;
 
+    // 如果使用epoll，那么files指针通常是null，即不会使用
     if (ngx_cycle->files && ngx_cycle->files[s] == NULL) {
         ngx_cycle->files[s] = c;
     }
@@ -1314,10 +1329,16 @@ void
 ngx_free_connection(ngx_connection_t *c)
 {
     // 调整空闲链表的指针，复用data成员
+    // free_connections是空闲链表头指针
     c->data = ngx_cycle->free_connections;
+
+    // 空闲链表头指针指向连接对象
     ngx_cycle->free_connections = c;
+
+    // 空闲连接数量增加
     ngx_cycle->free_connection_n++;
 
+    // 如果使用epoll，那么files指针通常是null，即不会使用
     if (ngx_cycle->files && ngx_cycle->files[c->fd] == c) {
         ngx_cycle->files[c->fd] = NULL;
     }

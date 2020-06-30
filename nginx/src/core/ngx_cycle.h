@@ -33,6 +33,7 @@ typedef struct ngx_shm_zone_s  ngx_shm_zone_t;
 
 typedef ngx_int_t (*ngx_shm_zone_init_pt) (ngx_shm_zone_t *zone, void *data);
 
+// ngx_shm_zone_t
 // nginx共享内存结构体
 // 使用共享内存锁保证安全
 //
@@ -109,6 +110,7 @@ struct ngx_cycle_s {
     ngx_uint_t                log_use_stderr;  /* unsigned  log_use_stderr:1; */
 
     // 文件也当做连接来处理，也是读写操作
+    // 如果使用epoll，那么这个指针通常是null，即不会使用
     ngx_connection_t        **files;
 
     // 空闲连接，使用指针串成单向链表
@@ -147,7 +149,8 @@ struct ngx_cycle_s {
     ngx_rbtree_t              config_dump_rbtree;
     ngx_rbtree_node_t         config_dump_sentinel;
 
-    // 打开的文件
+    // 打开的文件，主要是日志
+    // 存储ngx_open_file_t
     ngx_list_t                open_files;
 
     // 共享内存
